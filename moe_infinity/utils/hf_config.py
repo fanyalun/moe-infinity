@@ -7,6 +7,12 @@ from transformers import PretrainedConfig
 
 def parse_expert_dtype(config: PretrainedConfig) -> int:
     dtype = config.torch_dtype
+    # composite config (e.g. Qwen3VLMoeConfig) may have None
+    if dtype is None and hasattr(config, "text_config"):
+        dtype = config.text_config.torch_dtype
+    # fallback to bfloat16 if still None
+    if dtype is None:
+        dtype = torch.bfloat16
     if dtype == torch.bfloat16:
         dtype = 0
     elif dtype == torch.float32:

@@ -355,6 +355,13 @@ class OffloadEngine(object):
 
                 self.dtype = parse_expert_dtype(self.config)
                 self.dtype_cls = self.config.torch_dtype
+                # composite config (e.g. Qwen3VLMoe) may have None
+                if self.dtype_cls is None and hasattr(
+                    self.config, "text_config"
+                ):
+                    self.dtype_cls = self.config.text_config.torch_dtype
+                if self.dtype_cls is None:
+                    self.dtype_cls = torch.bfloat16
 
                 if self.config.model_type == "deepseek_v3":
                     self.dtype_cls = torch.float8_e4m3fn
