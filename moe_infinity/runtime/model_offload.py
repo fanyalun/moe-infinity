@@ -849,6 +849,13 @@ class OffloadEngine(object):
                 output_device_index = 0
 
             if "expert" in key:
+                print(
+                    f"[DEBUG] topo expert key={key} "
+                    f"n_experts={len(tensors)} "
+                    f"tensors_per_expert={len(tensors[0]) if tensors else 0} "
+                    f"layer_id={expert_layer_id}",
+                    flush=True,
+                )
                 for expert_idx, expert_tensors in enumerate(tensors):
                     expert_key = (
                         f"{key}.expert_{expert_idx}"

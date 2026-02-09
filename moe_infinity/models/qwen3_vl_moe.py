@@ -63,6 +63,12 @@ class SyncQwen3VLMoeSparseMoeBlock(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor
     ) -> torch.Tensor:
+        print(
+            f"[DEBUG] MoE forward layer={self.layer_id} "
+            f"input={hidden_states.shape} "
+            f"device={hidden_states.device}",
+            flush=True,
+        )
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -102,8 +108,19 @@ class SyncQwen3VLMoeSparseMoeBlock(nn.Module):
             device=hidden_states.device,
         )
 
+        print(
+            f"[DEBUG] dispatch_local layer={self.layer_id} "
+            f"mask={router_mask.shape} "
+            f"dtype={router_mask.dtype}",
+            flush=True,
+        )
         results = self.expert_executor.dispatch_local(
             hidden_states, router_mask, self.layer_id
+        )
+        print(
+            f"[DEBUG] dispatch done layer={self.layer_id} "
+            f"n_results={len(results)}",
+            flush=True,
         )
         for output, _, idx, _ in results:
             token_indices = router_mask[:, idx].bool()
