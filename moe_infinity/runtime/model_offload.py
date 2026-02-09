@@ -906,15 +906,19 @@ class OffloadEngine(object):
             tensor = state_dict[param_name]
 
             # Qwen3 VL MoE: split fused 3D expert weights
+            # gate_up_proj shape: [num_experts, hidden, 2*intermediate]
+            # need to split along last dim and transpose to
+            # nn.Linear format [out, in] for C++ ExpertDispatcher
             if (
                 "mlp.experts.gate_up_proj" in param_name
                 and tensor.dim() == 3
             ):
                 num_experts = tensor.shape[0]
-                intermediate = tensor.shape[1] // 2
+                intermediate = tensor.shape[2] // 2
                 for eid in range(num_experts):
-                    gate = tensor[eid, :intermediate, :]
-                    up = tensor[eid, intermediate:, :]
+                    w = tensor[eid]
+                    gate = w[:, :intermediate].T
+                    up = w[:, intermediate:].T
                     gname = param_name.replace(
                         "experts.gate_up_proj",
                         f"experts.{eid}.gate_proj.weight",
@@ -945,13 +949,15 @@ class OffloadEngine(object):
                         )
                 continue
 
+            # down_proj shape: [num_experts, intermediate, hidden]
+            # transpose to nn.Linear format [hidden, intermediate]
             if (
                 "mlp.experts.down_proj" in param_name
                 and tensor.dim() == 3
             ):
                 num_experts = tensor.shape[0]
                 for eid in range(num_experts):
-                    expert_t = tensor[eid]
+                    expert_t = tensor[eid].T
                     dname = param_name.replace(
                         "experts.down_proj",
                         f"experts.{eid}.down_proj.weight",
