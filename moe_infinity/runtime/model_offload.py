@@ -1033,13 +1033,39 @@ class OffloadEngine(object):
             device_list = []
 
             for name, param in module.named_parameters(recurse=False):
-                if param.data.data_ptr() not in self.offload_set:
+                in_set = param.data.data_ptr() in self.offload_set
+                print(
+                    f"[DEBUG]   param={name} "
+                    f"ptr={param.data.data_ptr()} "
+                    f"in_offload={in_set} "
+                    f"shape={list(param.data.shape)} "
+                    f"device={param.data.device}",
+                    flush=True,
+                )
+                if not in_set:
                     num_devices = torch.cuda.device_count()
+                    print(
+                        f"[DEBUG]   -> moving to cuda:{num_devices-1}",
+                        flush=True,
+                    )
                     param.data = param.data.to(f"cuda:{num_devices-1}")
+                    print(
+                        f"[DEBUG]   -> moved ok",
+                        flush=True,
+                    )
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
+                print(
+                    f"[DEBUG]   -> calling begin",
+                    flush=True,
+                )
                 self.archer_engine.begin(self.request_id, param)
+                print(
+                    f"[DEBUG]   -> begin done "
+                    f"new_device={param.data.device}",
+                    flush=True,
+                )
                 self.offload_set.add(param.data.data_ptr())
 
                 device_list.append(param.data.device)
