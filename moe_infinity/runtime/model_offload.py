@@ -1063,29 +1063,49 @@ class OffloadEngine(object):
                 self.archer_engine.begin(self.request_id, param)
                 print(
                     f"[DEBUG]   -> begin done "
-                    f"new_device={param.data.device}",
+                    f"new_device={param.data.device} "
+                    f"new_shape={list(param.data.shape)}",
                     flush=True,
                 )
                 self.offload_set.add(param.data.data_ptr())
 
                 device_list.append(param.data.device)
 
+            print(
+                f"[DEBUG]   pre_hook params done "
+                f"module={type(module).__name__}",
+                flush=True,
+            )
+
             for name, buf in module.named_buffers(recurse=False):
                 if buf.data.data_ptr() not in self.offload_set:
                     buf.data = buf.data.to("cuda:0")
                     continue
 
-                # print("offload buffer", name, buf.data.data_ptr())
-
                 self.offload_set.remove(buf.data_ptr())
                 self.archer_engine.begin(self.request_id, buf)
-                # buf = buf.to(self.dtype)
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.data.device)
 
+            print(
+                f"[DEBUG]   pre_hook complete "
+                f"module={type(module).__name__}",
+                flush=True,
+            )
+
         @torch.no_grad()
         def _post_forward_module_hook(module, input, output):
+            has_params = any(
+                True
+                for _ in module.named_parameters(recurse=False)
+            )
+            if has_params:
+                print(
+                    f"[DEBUG] post_hook {type(module).__name__} "
+                    f"id={getattr(module, 'id', '?')}",
+                    flush=True,
+                )
             device_list = []
             param_not_offload = set()
             for param in module.parameters(recurse=False):
@@ -1094,7 +1114,15 @@ class OffloadEngine(object):
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
+                print(
+                    f"[DEBUG]   -> calling end",
+                    flush=True,
+                )
                 self.archer_engine.end(self.request_id, param)
+                print(
+                    f"[DEBUG]   -> end done",
+                    flush=True,
+                )
                 self.offload_set.add(param.data.data_ptr())
 
                 device_list.append(param.data.device)
