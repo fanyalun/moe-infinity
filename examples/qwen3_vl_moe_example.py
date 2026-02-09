@@ -5,7 +5,10 @@ from moe_infinity import MoE
 
 user_home = os.path.expanduser("~")
 
-model_name = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+model_name = os.environ.get(
+    "MODEL_PATH",
+    "/data1/fanya/models/Qwen/Qwen3-VL-30B-A3B-Instruct",
+)
 
 # step 1: check transformers version and model support
 print("=" * 50)
@@ -86,14 +89,18 @@ print("\n" + "=" * 50)
 print("Step 4: checking checkpoint parameter names")
 print("=" * 50)
 
-from huggingface_hub import snapshot_download
+if os.path.isdir(model_name):
+    model_path = model_name
+    print(f"[OK] using local model path: {model_path}")
+else:
+    from huggingface_hub import snapshot_download
 
-model_path = snapshot_download(
-    model_name,
-    cache_dir=os.environ.get("TRANSFORMERS_CACHE", None),
-    ignore_patterns=["flax*", "tf*"],
-)
-print(f"[OK] model downloaded to: {model_path}")
+    model_path = snapshot_download(
+        model_name,
+        cache_dir=os.environ.get("TRANSFORMERS_CACHE", None),
+        ignore_patterns=["flax*", "tf*"],
+    )
+    print(f"[OK] model downloaded to: {model_path}")
 
 from safetensors import safe_open
 
