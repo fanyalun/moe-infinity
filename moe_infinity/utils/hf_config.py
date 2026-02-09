@@ -47,6 +47,22 @@ def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:
         num_decoder_layers = config.num_hidden_layers
         num_layers = config.num_hidden_layers
         num_experts = config.n_routed_experts
+    elif "qwen3vlmoe" in arch:
+        text_config = (
+            config.text_config
+            if hasattr(config, "text_config")
+            else config
+        )
+        num_encoder_layers = 0
+        num_decoder_layers = text_config.num_hidden_layers
+        num_layers = sum(
+            1
+            for i in range(text_config.num_hidden_layers)
+            if (i not in text_config.mlp_only_layers)
+            and (text_config.num_experts > 0)
+            and ((i + 1) % text_config.decoder_sparse_step == 0)
+        )
+        num_experts = text_config.num_experts
     else:
         raise RuntimeError(f"Unsupported architecture {arch}")
 
@@ -112,6 +128,38 @@ def parse_expert_id(
             # print(f"layer_id: {layer_id}, expert_id: {expert_id}")
             layer_id = int(layer_id)
             expert_id = int(expert_id)
+
+    elif "qwen3vlmoe" in arch:
+        encoder_sparse_step = None
+        decoder_sparse_step = 1
+        layer_type = "decoder"
+
+        # split param name format:
+        # model.language_model.layers.{layer}.mlp.experts.{id}.gate_proj.weight
+        result = re.findall(
+            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.", param_name
+        )
+        if result:
+            layer_id, expert_id = result[0]
+            layer_id = int(layer_id)
+            expert_id = int(expert_id)
+            # convert original layer index to MoE layer index
+            text_config = (
+                config.text_config
+                if hasattr(config, "text_config")
+                else config
+            )
+            moe_layer_idx = sum(
+                1
+                for i in range(layer_id)
+                if (i not in text_config.mlp_only_layers)
+                and (text_config.num_experts > 0)
+                and (
+                    (i + 1) % text_config.decoder_sparse_step
+                    == 0
+                )
+            )
+            layer_id = moe_layer_idx
 
     if result:
         if layer_type == "decoder":

@@ -11,6 +11,13 @@ from ..models.modeling_arctic import (
 )  # TODO: Replace this with huggingface transformers
 from ..models.modeling_deepseek import DeepseekV2ForCausalLM
 from ..models.modeling_deepseek_v3 import DeepseekV3ForCausalLM
+
+try:
+    from transformers import Qwen3VLMoeForConditionalGeneration
+
+    _has_qwen3_vl_moe = True
+except ImportError:
+    _has_qwen3_vl_moe = False
 from ..models.modeling_grok.modeling_grok1 import (
     Grok1ModelForCausalLM,
 )  # TODO: Replace this with huggingface transformers
@@ -26,6 +33,11 @@ MODEL_MAPPING_NAMES = {
     "deepseek_v3": DeepseekV3ForCausalLM,
 }
 
+if _has_qwen3_vl_moe:
+    MODEL_MAPPING_NAMES["qwen3vlmoe"] = (
+        Qwen3VLMoeForConditionalGeneration
+    )
+
 MODEL_MAPPING_TYPES = {
     "switch": 0,
     "nllb": 2,
@@ -34,6 +46,7 @@ MODEL_MAPPING_TYPES = {
     "arctic": 4,
     "deepseek": 5,
     "deepseek_v3": 5,
+    "qwen3vlmoe": 5,
 }
 
 

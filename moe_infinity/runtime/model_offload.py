@@ -33,6 +33,7 @@ from moe_infinity.models import (
     SyncGrokMoeBlock,
     SyncMixtralSparseMoeBlock,
     SyncNllbMoeSparseMLP,
+    SyncQwen3VLMoeSparseMoeBlock,
     SyncSwitchTransformersSparseMLP,
 )
 from moe_infinity.ops.op_builder.prefetch import PrefetchBuilder
@@ -318,6 +319,20 @@ class OffloadEngine(object):
         moe_infinity.models.modeling_deepseek.modeling_deepseek.DeepseekV2MoE = DeepseekMoEBlock
         moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.DeepseekV3MoE = DeepseekMoEBlock
 
+        # Qwen3 VL MoE
+        try:
+            import transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe as qwen3_vl_moe_module
+
+            qwen3_vl_moe_module._old_sparse_mlp = (
+                qwen3_vl_moe_module.Qwen3VLMoeTextSparseMoeBlock
+            )
+            qwen3_vl_moe_module.Qwen3VLMoeTextSparseMoeBlock = (
+                SyncQwen3VLMoeSparseMoeBlock
+            )
+            self._has_qwen3_vl_moe = True
+        except (ImportError, AttributeError):
+            self._has_qwen3_vl_moe = False
+
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
         ) -> Callable:
@@ -560,6 +575,9 @@ class OffloadEngine(object):
                         or isinstance(module, SyncGrokMoeBlock)
                         or isinstance(module, SyncArcticMoeBlock)
                         or isinstance(module, DeepseekMoEBlock)
+                        or isinstance(
+                            module, SyncQwen3VLMoeSparseMoeBlock
+                        )
                     ):
                         # module.archer_prefetch = self.archer_prefetch
                         # module.archer_tracer = self.archer_tracer
@@ -828,6 +846,7 @@ class OffloadEngine(object):
                         and self.config.model_type != "arctic"
                         and self.config.model_type != "deepseek_v2"
                         and self.config.model_type != "deepseek_v3"
+                        and self.config.model_type != "qwen3_vl_moe"
                         else f"{key}.{expert_idx}"
                     )
                     input_device_index = (
@@ -884,6 +903,71 @@ class OffloadEngine(object):
         param_names = list(state_dict.keys())
 
         for param_name in param_names:
+            tensor = state_dict[param_name]
+
+            # Qwen3 VL MoE: split fused 3D expert weights
+            if (
+                "mlp.experts.gate_up_proj" in param_name
+                and tensor.dim() == 3
+            ):
+                num_experts = tensor.shape[0]
+                intermediate = tensor.shape[1] // 2
+                for eid in range(num_experts):
+                    gate = tensor[eid, :intermediate, :]
+                    up = tensor[eid, intermediate:, :]
+                    gname = param_name.replace(
+                        "experts.gate_up_proj",
+                        f"experts.{eid}.gate_proj.weight",
+                    )
+                    uname = param_name.replace(
+                        "experts.gate_up_proj",
+                        f"experts.{eid}.up_proj.weight",
+                    )
+                    self.name_id_map[gname] = (
+                        self._generate_param_id()
+                    )
+                    if not self.archer_engine.is_tensor_offloaded(
+                        self.name_id_map[gname]
+                    ):
+                        self.archer_engine.offload(
+                            gate.contiguous(),
+                            self.name_id_map[gname],
+                        )
+                    self.name_id_map[uname] = (
+                        self._generate_param_id()
+                    )
+                    if not self.archer_engine.is_tensor_offloaded(
+                        self.name_id_map[uname]
+                    ):
+                        self.archer_engine.offload(
+                            up.contiguous(),
+                            self.name_id_map[uname],
+                        )
+                continue
+
+            if (
+                "mlp.experts.down_proj" in param_name
+                and tensor.dim() == 3
+            ):
+                num_experts = tensor.shape[0]
+                for eid in range(num_experts):
+                    expert_t = tensor[eid]
+                    dname = param_name.replace(
+                        "experts.down_proj",
+                        f"experts.{eid}.down_proj.weight",
+                    )
+                    self.name_id_map[dname] = (
+                        self._generate_param_id()
+                    )
+                    if not self.archer_engine.is_tensor_offloaded(
+                        self.name_id_map[dname]
+                    ):
+                        self.archer_engine.offload(
+                            expert_t.contiguous(),
+                            self.name_id_map[dname],
+                        )
+                continue
+
             self.name_id_map[param_name] = self._generate_param_id()
             if not self.archer_engine.is_tensor_offloaded(
                 self.name_id_map[param_name]
@@ -1007,3 +1091,11 @@ class OffloadEngine(object):
 
         moe_infinity.models.modeling_deepseek.modeling_deepseek.DeepseekV2MoE = moe_infinity.models.modeling_deepseek._old_sparse_mlp
         moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.DeepseekV3MoE = moe_infinity.models.modeling_deepseek_v3._old_sparse_mlp
+
+        # Qwen3 VL MoE
+        if getattr(self, "_has_qwen3_vl_moe", False):
+            import transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe as qwen3_vl_moe_module
+
+            qwen3_vl_moe_module.Qwen3VLMoeTextSparseMoeBlock = (
+                qwen3_vl_moe_module._old_sparse_mlp
+            )
