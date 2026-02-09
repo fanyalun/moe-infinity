@@ -114,6 +114,8 @@ void ArcherPrefetchHandle::AcquireTensor(std::uint64_t& request_id,
     }
     kTaskPool->StartExec(request_id, node);
     node->cv.wait(lock, [node] { return node->state == 0; });
+    // keep mutex locked; ReleaseTensor will unlock it
+    lock.release();
   }
 
   kArcherTensorHandle->SetTensor(tensor_id, buffer);
@@ -144,7 +146,7 @@ void ArcherPrefetchHandle::ReleaseTensor(std::uint64_t& request_id,
   // TraceRequest(request_id, tensor_id);
 
   auto current_layer_id = node->corr_id & 0xFFFFFFFF;
-  if (current_layer_id != last_layer_id_ &&
+  if (last_node_ && current_layer_id != last_layer_id_ &&
       node_id_to_tensor_ids_[last_node_->id].size() != 0) {
     node_id_to_tensor_ids_[last_node_->id].clear();
     kTaskPool->StopExec(request_id,
