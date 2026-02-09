@@ -791,9 +791,18 @@ class OffloadEngine(object):
         self.archer_engine.set_topology(topo)
 
         @torch.no_grad()
-        def _pre_forward_input_hook(module, input, kwargs, device, tensors):
-            # print("pre_forward_input_hook", device, input, tensors)
+        def _pre_forward_input_hook(module, input, kwargs, device, tensors, hook_key=""):
+            print(
+                f"[DEBUG] fetch hook={hook_key} "
+                f"module={type(module).__name__} "
+                f"device={device} n_tensors={len(tensors)}",
+                flush=True,
+            )
             self.archer_engine.fetch_tensors(self.request_id, tensors)
+            print(
+                f"[DEBUG] fetch done hook={hook_key}",
+                flush=True,
+            )
             new_args = copy_args_to_device(device, input)
             new_kwargs = copy_kwargs_to_device(device, kwargs)
             return new_args, new_kwargs
@@ -825,6 +834,7 @@ class OffloadEngine(object):
                     _pre_forward_input_hook,
                     device=input_device_index,
                     tensors=tensors,
+                    hook_key=key,
                 ),
                 prepend=True,
                 with_kwargs=True,
@@ -1012,13 +1022,13 @@ class OffloadEngine(object):
 
         @torch.no_grad()
         def _pre_forward_module_hook(module, args, kwargs):
-            # if self.request_id_flag == False:
-            #     self.request_id_flag = True
-            #     # print(kwargs, args, type(module))
-
-            #     request_id = self._generate_request_id()
-            #     # self.archer_tracer.set_request_id(request_id)
-            #     # self.archer_prefetch.set_request(request_id)
+            has_params = any(True for _ in module.named_parameters(recurse=False))
+            if has_params:
+                print(
+                    f"[DEBUG] module_hook {type(module).__name__} "
+                    f"id={getattr(module, 'id', '?')}",
+                    flush=True,
+                )
 
             device_list = []
 
