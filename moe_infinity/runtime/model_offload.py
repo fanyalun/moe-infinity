@@ -691,8 +691,12 @@ class OffloadEngine(object):
 
                 else:
                     match = re.match(r"(.*\.\d+\.)", name)
-                    last_number_position = match.end() - 2
-                    stored_name = name[: last_number_position + 1]
+                    if match:
+                        last_number_position = match.end() - 2
+                        stored_name = name[: last_number_position + 1]
+                    else:
+                        # digit not in .digit. format (e.g. norm1)
+                        stored_name = name.rsplit(".", 1)[0]
 
                     if stored_name in name_lst:
                         ret_dict[stored_name][0].append(self.name_id_map[name])
