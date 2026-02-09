@@ -133,6 +133,7 @@ class MoE:
                 or arch == "deepseek"
                 or arch == "deepseek_v3"
                 or arch == "nllb"
+                or arch == "qwen3vlmoe"
             ):
                 is_flash_attn_available = False
         except ImportError:
