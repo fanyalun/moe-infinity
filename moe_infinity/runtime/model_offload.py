@@ -1095,6 +1095,13 @@ class OffloadEngine(object):
                 flush=True,
             )
 
+            # align input device with weight device
+            if device_list:
+                target = device_list[0]
+                new_args = copy_args_to_device(target, args)
+                new_kwargs = copy_kwargs_to_device(target, kwargs)
+                return new_args, new_kwargs
+
         @torch.no_grad()
         def _post_forward_module_hook(module, input, output):
             has_params = any(
