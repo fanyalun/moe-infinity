@@ -155,13 +155,30 @@ def run_benchmark(args):
                 tokenize=False,
                 add_generation_prompt=True,
             )
-            images, _ = process_vision_info(msgs)
+            images, videos, video_kwargs = (
+                process_vision_info(
+                    msgs,
+                    image_patch_size=16,
+                    return_video_kwargs=True,
+                    return_video_metadata=True,
+                )
+            )
+            video_metadatas = None
+            if videos is not None:
+                videos, video_metadatas = zip(*videos)
+                videos = list(videos)
+                video_metadatas = list(video_metadatas)
             inputs = processor(
                 text=[text],
                 images=images,
-                videos=None,
+                videos=videos,
+                video_metadata=video_metadatas,
+                do_resize=True,
+                max_pixels=5120 * 28 * 28,
+                min_pixels=768 * 28 * 28,
                 padding=True,
                 return_tensors="pt",
+                **(video_kwargs or {}),
             ).to(model.device)
             _ = model.generate(**inputs, max_new_tokens=10)
         except Exception as e:
@@ -190,13 +207,25 @@ def run_benchmark(args):
             )
             images, videos, video_kwargs = (
                 process_vision_info(
-                    messages, return_video_kwargs=True
+                    messages,
+                    image_patch_size=16,
+                    return_video_kwargs=True,
+                    return_video_metadata=True,
                 )
             )
+            video_metadatas = None
+            if videos is not None:
+                videos, video_metadatas = zip(*videos)
+                videos = list(videos)
+                video_metadatas = list(video_metadatas)
             inputs = processor(
                 text=text,
                 images=images,
                 videos=videos,
+                video_metadata=video_metadatas,
+                do_resize=True,
+                max_pixels=5120 * 28 * 28,
+                min_pixels=768 * 28 * 28,
                 return_tensors="pt",
                 **(video_kwargs or {}),
             ).to(model.device)
