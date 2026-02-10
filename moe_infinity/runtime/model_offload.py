@@ -671,7 +671,6 @@ class OffloadEngine(object):
         for name, _ in model.named_parameters(recurse=True):
             match = re.search(r"\d+", name)
             if name not in self.name_id_map:
-                print("param not in self.name_id_map", name)
                 continue
             if match:
                 if "expert" in name and "shared_experts" not in name:

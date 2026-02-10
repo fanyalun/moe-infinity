@@ -515,19 +515,22 @@ void ArcherTopologyHandle::InitializeTopology(
   // int sparse_gpu_idx = 0;
 
   // Split evently dense nodes only
-  int num_dense_nodes_per_device = std::ceil(dense_nodes.size() / num_gpu / 2);
-  // int total_dense_nodes = dense_nodes.size();
-  int counter = 0;
-  DLOG_INFO("Moving dense parameters to GPU");
-  for (auto& node_ptr : tqdm::tqdm(dense_nodes)) {
-    node_ptr->default_device = torch::Device(torch::kCUDA, target_device_id);
-    counter++;
-    if (counter % num_dense_nodes_per_device == 0) {
-      target_device_id = (target_device_id + 1) % num_gpu;
+  if (!dense_nodes.empty()) {
+    int num_dense_nodes_per_device =
+        std::max(1, (int)std::ceil((double)dense_nodes.size() / num_gpu / 2));
+    int counter = 0;
+    DLOG_INFO("Moving dense parameters to GPU");
+    for (auto& node_ptr : tqdm::tqdm(dense_nodes)) {
+      node_ptr->default_device = torch::Device(torch::kCUDA, target_device_id);
+      counter++;
+      if (counter % num_dense_nodes_per_device == 0) {
+        target_device_id = (target_device_id + 1) % num_gpu;
+      }
+      node_ptr->SetDevice(node_ptr->default_device, false);
     }
-    node_ptr->SetDevice(node_ptr->default_device, false);
+    dense_nodes.back()->default_device =
+        torch::Device(torch::kCUDA, num_gpu - 1);
   }
-  dense_nodes.back()->default_device = torch::Device(torch::kCUDA, num_gpu - 1);
 
   DLOG_INFO("Moving sparse parameters to CPU");
   for (auto& node_ptr : tqdm::tqdm(sparse_nodes)) {
