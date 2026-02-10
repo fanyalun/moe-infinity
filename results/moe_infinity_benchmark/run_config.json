@@ -1,0 +1,16 @@
+{
+  "timestamp": "2026-02-10 10:53:05",
+  "arguments": {
+    "model_path": "/data1/fanya/models/Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "data_dir": "/data1/fanya/datasets/mmstar/MMStar.tsv",
+    "output_dir": "./results/moe_infinity_benchmark",
+    "offload_path": "/home/fanya/moe-infinity-qwen3vl",
+    "device_memory_ratio": 0.95,
+    "max_new_tokens": 50,
+    "num_samples": 20
+  },
+  "moe_config": {
+    "offload_path": "/home/fanya/moe-infinity-qwen3vl",
+    "device_memory_ratio": 0.95
+  }
+}

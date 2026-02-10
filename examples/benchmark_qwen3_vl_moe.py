@@ -322,16 +322,13 @@ def main():
     parser.add_argument(
         "--model-path",
         type=str,
-        default="/data1/fanya/models/Qwen/"
-        "Qwen3-VL-30B-A3B-Instruct",
+        default="/data1/fanya/models/Qwen/Qwen3-VL-30B-A3B-Instruct",
     )
     parser.add_argument(
-        "--data-dir", type=str, required=True
+        "--data-dir", type=str, default="/data1/fanya/datasets/mmstar/MMStar.tsv"
     )
     parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="./results/moe_infinity_benchmark",
+        "--output-dir", type=str, default="./results/moe_infinity_benchmark",
     )
     parser.add_argument(
         "--offload-path",
@@ -344,7 +341,7 @@ def main():
     parser.add_argument(
         "--device-memory-ratio",
         type=float,
-        default=0.75,
+        default=0.95,
     )
     parser.add_argument(
         "--max-new-tokens", type=int, default=50
