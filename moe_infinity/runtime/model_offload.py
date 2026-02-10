@@ -934,18 +934,19 @@ class OffloadEngine(object):
             tensor = state_dict[param_name]
 
             # Qwen3 VL MoE: split fused 3D expert weights
-            # gate_up_proj shape: [num_experts, 2*intermediate, hidden]
-            # already in nn.Linear format [out, in], split along dim=1
+            # gate_up_proj shape: [num_experts, hidden, 2*moe_inter]
+            # split along last dim, then transpose to nn.Linear
+            # format [out, in] = [moe_inter, hidden]
             if (
                 "mlp.experts.gate_up_proj" in param_name
                 and tensor.dim() == 3
             ):
                 num_experts = tensor.shape[0]
-                intermediate = tensor.shape[1] // 2
+                moe_inter = tensor.shape[2] // 2
                 for eid in range(num_experts):
-                    w = tensor[eid]  # [2*intermediate, hidden]
-                    gate = w[:intermediate, :]  # [intermediate, hidden]
-                    up = w[intermediate:, :]  # [intermediate, hidden]
+                    w = tensor[eid]  # [hidden, 2*moe_inter]
+                    gate = w[:, :moe_inter].t()  # [moe_inter, hidden]
+                    up = w[:, moe_inter:].t()  # [moe_inter, hidden]
                     gname = param_name.replace(
                         "experts.gate_up_proj",
                         f"experts.{eid}.gate_proj.weight",
@@ -976,8 +977,8 @@ class OffloadEngine(object):
                         )
                 continue
 
-            # down_proj shape: [num_experts, hidden, intermediate]
-            # already in nn.Linear format [out, in], no transpose
+            # down_proj shape: [num_experts, hidden, moe_inter]
+            # C++ expects [hidden, moe_inter], matches directly
             if (
                 "mlp.experts.down_proj" in param_name
                 and tensor.dim() == 3
