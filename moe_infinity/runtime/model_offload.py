@@ -977,15 +977,15 @@ class OffloadEngine(object):
                         )
                 continue
 
-            # down_proj shape: [num_experts, hidden, moe_inter]
-            # C++ expects [hidden, moe_inter], matches directly
+            # down_proj shape: [num_experts, moe_inter, hidden]
+            # C++ expects [hidden, moe_inter], need transpose
             if (
                 "mlp.experts.down_proj" in param_name
                 and tensor.dim() == 3
             ):
                 num_experts = tensor.shape[0]
                 for eid in range(num_experts):
-                    expert_w = tensor[eid]  # [hidden, intermediate]
+                    expert_w = tensor[eid].t()  # [hidden, moe_inter]
                     dname = param_name.replace(
                         "experts.down_proj",
                         f"experts.{eid}.down_proj.weight",
