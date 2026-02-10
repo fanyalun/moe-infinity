@@ -1059,9 +1059,9 @@ class OffloadEngine(object):
         ):
             sd = torch.load(shard_path, map_location="cpu")
             for k, v in sd.items():
-                target = param_lookup.get(
-                    k
-                ) or buf_lookup.get(k)
+                target = param_lookup.get(k)
+                if target is None:
+                    target = buf_lookup.get(k)
                 if target is None:
                     continue
                 target.data = v.to(target.dtype).to(device)
