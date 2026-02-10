@@ -96,3 +96,4 @@ C++ queue tests use CMake in `tests/queues/`.
 - 需要安装/卸载的依赖告知用户，不自行安装
 - 保持代码简洁
 - 对话时称呼用户为“主人”
+- 修改完代码后，上传到GitHub

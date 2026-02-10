@@ -99,6 +99,7 @@ class OffloadEngine(object):
         self.backward_hooks = []
 
         self.offload_set = set()
+        self._dense_shard_idx = 0
 
         if isinstance(ar_config, str):
             _archer_config = ArcherConfig.load_from_file(ar_config)
@@ -459,6 +460,9 @@ class OffloadEngine(object):
                 base_model_prefix = model.base_model_prefix
                 # model = model.to(self.dtype).to("cpu")
 
+                # Load dense params directly to GPU from checkpoints
+                self._load_dense_params(model, base_model_prefix)
+
                 # print("Model created with dtype", self.dtype, flush=True)
                 # for name, param in model.named_parameters(recurse=False):
                 #     print(name, param.dtype, flush=True)
@@ -505,8 +509,11 @@ class OffloadEngine(object):
                             self.name_id_map.pop(name_without_prefix)
                     param.ar_id = self.name_id_map.get(name, None)
 
-                # the case for NLLB MoE
-                if "lm_head.weight" not in self.name_id_map:
+                # the case for NLLB MoE (weight tying)
+                if (
+                    self.config.model_type == "nllb_moe"
+                    and "lm_head.weight" not in self.name_id_map
+                ):
                     print(
                         "lm_head.weight not in name_id_map, add it as embed_tokens"
                     )
@@ -792,17 +799,7 @@ class OffloadEngine(object):
 
         @torch.no_grad()
         def _pre_forward_input_hook(module, input, kwargs, device, tensors, hook_key=""):
-            print(
-                f"[DEBUG] fetch hook={hook_key} "
-                f"module={type(module).__name__} "
-                f"device={device} n_tensors={len(tensors)}",
-                flush=True,
-            )
             self.archer_engine.fetch_tensors(self.request_id, tensors)
-            print(
-                f"[DEBUG] fetch done hook={hook_key}",
-                flush=True,
-            )
             new_args = copy_args_to_device(device, input)
             new_kwargs = copy_kwargs_to_device(device, kwargs)
             return new_args, new_kwargs
@@ -859,13 +856,6 @@ class OffloadEngine(object):
                 output_device_index = 0
 
             if "expert" in key:
-                print(
-                    f"[DEBUG] topo expert key={key} "
-                    f"n_experts={len(tensors)} "
-                    f"tensors_per_expert={len(tensors[0]) if tensors else 0} "
-                    f"layer_id={expert_layer_id}",
-                    flush=True,
-                )
                 for expert_idx, expert_tensors in enumerate(tensors):
                     expert_key = (
                         f"{key}.expert_{expert_idx}"
@@ -923,6 +913,13 @@ class OffloadEngine(object):
         self.request_id += 1
         return request_id
 
+    def _is_expert_param(self, param_name: str) -> bool:
+        if "expert" not in param_name:
+            return False
+        if "shared_expert" in param_name:
+            return False
+        return True
+
     def _offload_state_dict(
         self,
         state_dict: Dict[str, torch.Tensor],
@@ -930,7 +927,13 @@ class OffloadEngine(object):
     ) -> None:
         param_names = list(state_dict.keys())
 
+        dense_params = {}
         for param_name in param_names:
+            if not self._is_expert_param(param_name):
+                # Collect dense params for saving to disk
+                dense_params[param_name] = state_dict[param_name]
+                continue
+
             tensor = state_dict[param_name]
 
             # Qwen3 VL MoE: split fused 3D expert weights
@@ -1010,8 +1013,69 @@ class OffloadEngine(object):
                     state_dict[param_name], self.name_id_map[param_name]
                 )
 
+        # Save dense params as a shard file
+        if dense_params:
+            shard_path = os.path.join(
+                self.checkpoint,
+                f"dense_shard_{self._dense_shard_idx}.pt",
+            )
+            torch.save(dense_params, shard_path)
+            self._dense_shard_idx += 1
+
         gc.collect()
         torch.cuda.empty_cache()
+
+    def _load_dense_params(self, model, base_model_prefix):
+        import glob as glob_module
+
+        device = torch.device("cuda:0")
+
+        # Build lookup: name -> param/buffer (with and without prefix)
+        param_lookup = {}
+        for name, param in model.named_parameters(recurse=True):
+            param_lookup[name] = param
+            if name.startswith(base_model_prefix + "."):
+                short = name[len(base_model_prefix) + 1 :]
+                param_lookup[short] = param
+
+        buf_lookup = {}
+        for name, buf in model.named_buffers(recurse=True):
+            buf_lookup[name] = buf
+            if name.startswith(base_model_prefix + "."):
+                short = name[len(base_model_prefix) + 1 :]
+                buf_lookup[short] = buf
+
+        shard_files = sorted(
+            glob_module.glob(
+                os.path.join(
+                    self.checkpoint, "dense_shard_*.pt"
+                )
+            )
+        )
+
+        loaded = 0
+        for shard_path in tqdm(
+            shard_files, desc="Loading dense params to GPU"
+        ):
+            sd = torch.load(shard_path, map_location="cpu")
+            for k, v in sd.items():
+                target = param_lookup.get(
+                    k
+                ) or buf_lookup.get(k)
+                if target is None:
+                    continue
+                target.data = v.to(target.dtype).to(device)
+                self.offload_exemption.add(
+                    target.data.data_ptr()
+                )
+                loaded += 1
+            del sd
+            gc.collect()
+
+        print(
+            f"Loaded {loaded} dense params to GPU",
+            flush=True,
+        )
 
     def _register_hooks_recursively(self, module, count=[0]):
         my_count = count[0]
@@ -1023,117 +1087,78 @@ class OffloadEngine(object):
 
         @torch.no_grad()
         def _pre_forward_module_hook(module, args, kwargs):
-            has_params = any(True for _ in module.named_parameters(recurse=False))
-            if has_params:
-                print(
-                    f"[DEBUG] module_hook {type(module).__name__} "
-                    f"id={getattr(module, 'id', '?')}",
-                    flush=True,
-                )
-
             device_list = []
 
             for name, param in module.named_parameters(recurse=False):
-                in_set = param.data.data_ptr() in self.offload_set
-                print(
-                    f"[DEBUG]   param={name} "
-                    f"ptr={param.data.data_ptr()} "
-                    f"in_offload={in_set} "
-                    f"shape={list(param.data.shape)} "
-                    f"device={param.data.device}",
-                    flush=True,
-                )
-                if not in_set:
+                # Dense params already on GPU, skip
+                if param.data.data_ptr() in self.offload_exemption:
+                    continue
+
+                if param.data.data_ptr() not in self.offload_set:
                     num_devices = torch.cuda.device_count()
-                    print(
-                        f"[DEBUG]   -> moving to cuda:{num_devices-1}",
-                        flush=True,
-                    )
-                    param.data = param.data.to(f"cuda:{num_devices-1}")
-                    print(
-                        f"[DEBUG]   -> moved ok",
-                        flush=True,
+                    param.data = param.data.to(
+                        f"cuda:{num_devices-1}"
                     )
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
-                print(
-                    f"[DEBUG]   -> calling begin",
-                    flush=True,
-                )
-                self.archer_engine.begin(self.request_id, param)
-                print(
-                    f"[DEBUG]   -> begin done "
-                    f"new_device={param.data.device} "
-                    f"new_shape={list(param.data.shape)}",
-                    flush=True,
+                self.archer_engine.begin(
+                    self.request_id, param
                 )
                 self.offload_set.add(param.data.data_ptr())
 
                 device_list.append(param.data.device)
 
-            print(
-                f"[DEBUG]   pre_hook params done "
-                f"module={type(module).__name__}",
-                flush=True,
-            )
-
             for name, buf in module.named_buffers(recurse=False):
+                # Dense buffers already on GPU, skip
+                if buf.data.data_ptr() in self.offload_exemption:
+                    continue
+
                 if buf.data.data_ptr() not in self.offload_set:
                     buf.data = buf.data.to("cuda:0")
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
-                self.archer_engine.begin(self.request_id, buf)
+                self.archer_engine.begin(
+                    self.request_id, buf
+                )
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.data.device)
 
-            print(
-                f"[DEBUG]   pre_hook complete "
-                f"module={type(module).__name__}",
-                flush=True,
-            )
-
         @torch.no_grad()
         def _post_forward_module_hook(module, input, output):
-            has_params = any(
-                True
-                for _ in module.named_parameters(recurse=False)
-            )
-            if has_params:
-                print(
-                    f"[DEBUG] post_hook {type(module).__name__} "
-                    f"id={getattr(module, 'id', '?')}",
-                    flush=True,
-                )
             device_list = []
             param_not_offload = set()
             for param in module.parameters(recurse=False):
+                # Dense params already on GPU, skip
+                if param.data.data_ptr() in self.offload_exemption:
+                    continue
+
                 if param.data.data_ptr() not in self.offload_set:
                     param_not_offload.add(param.data.data_ptr())
                     continue
 
                 self.offload_set.remove(param.data.data_ptr())
-                print(
-                    f"[DEBUG]   -> calling end",
-                    flush=True,
-                )
-                self.archer_engine.end(self.request_id, param)
-                print(
-                    f"[DEBUG]   -> end done",
-                    flush=True,
+                self.archer_engine.end(
+                    self.request_id, param
                 )
                 self.offload_set.add(param.data.data_ptr())
 
                 device_list.append(param.data.device)
 
             for buf in module.buffers(recurse=False):
+                # Dense buffers already on GPU, skip
+                if buf.data_ptr() in self.offload_exemption:
+                    continue
+
                 if buf.data_ptr() not in self.offload_set:
                     continue
 
                 self.offload_set.remove(buf.data_ptr())
-                self.archer_engine.end(self.request_id, buf)
+                self.archer_engine.end(
+                    self.request_id, buf
+                )
                 self.offload_set.add(buf.data_ptr())
 
                 device_list.append(buf.device)
