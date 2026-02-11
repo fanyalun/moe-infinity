@@ -41,8 +41,8 @@ class ExpertPrefetcher(object):
 
     def prefetch_experts(self, layer_id, expert_matrix):
         expert_list = []
-        # print("expert_tensor_map", self.expert_tensor_map)
-        for i in range(layer_id, self.num_layers):
+        # start from next layer to avoid mutex race with dispatch
+        for i in range(layer_id + 1, self.num_layers):
             for j in range(self.num_experts):
                 if expert_matrix[i, j] > 0:
                     expert_list.append(
