@@ -5,6 +5,21 @@ from typing import Any, Dict, Union
 import torch
 import transformers
 from accelerate.utils.versions import is_torch_version
+
+
+def _diag_gen(label):
+    if not torch.cuda.is_available():
+        return
+    torch.cuda.synchronize()
+    free, total = torch.cuda.mem_get_info(0)
+    used = (total - free) / (1024 ** 2)
+    pt_r = torch.cuda.memory_reserved(0) / (1024 ** 2)
+    print(
+        f"[GEN-DIAG] {label}: "
+        f"nvidia≈{used:.0f}MB, "
+        f"non-pt={used - pt_r:.0f}MB",
+        flush=True,
+    )
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig
 
@@ -191,8 +206,16 @@ class MoE:
         self._configure_hook(input_ids)
 
         self.model.eval()
+        if not hasattr(self, '_gen_call_count'):
+            self._gen_call_count = 0
+        self._gen_call_count += 1
+        _diag = self._gen_call_count <= 6
+        if _diag:
+            _diag_gen(f"generate#{self._gen_call_count} before model.generate")
         with torch.no_grad():
             output = self.model.generate(input_ids, **kwargs)
+        if _diag:
+            _diag_gen(f"generate#{self._gen_call_count} after model.generate")
 
         # finish trace entries so they accumulate in trace_collection
         for seq_id in self.seq_id_list:

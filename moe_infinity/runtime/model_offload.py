@@ -1075,12 +1075,26 @@ class OffloadEngine(object):
             count[0] = count[0] + 1
             self._register_hooks_recursively(child, count=count)
 
+        _hook_diag_budget = [20]  # mutable counter
+
         @torch.no_grad()
         def _pre_forward_module_hook(module, args, kwargs):
             device_list = []
 
             for name, param in module.named_parameters(recurse=False):
                 if param.data.data_ptr() not in self.offload_set:
+                    sz = param.data.nelement() * param.data.element_size()
+                    if sz > 1024 and _hook_diag_budget[0] > 0:
+                        _hook_diag_budget[0] -= 1
+                        print(
+                            f"[HOOK-DIAG] .to(cuda) "
+                            f"mod={module.__class__.__name__} "
+                            f"param={name} "
+                            f"shape={list(param.data.shape)} "
+                            f"dev={param.data.device} "
+                            f"bytes={sz}",
+                            flush=True,
+                        )
                     num_devices = torch.cuda.device_count()
                     param.data = param.data.to(
                         f"cuda:{num_devices-1}"

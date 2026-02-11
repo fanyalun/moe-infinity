@@ -220,6 +220,8 @@ def run_benchmark(args):
         desc="Inference",
     ):
         try:
+            if idx == 0:
+                _bm_diag("inf[0] before build_prompt")
             messages = build_prompt(row, img_root)
             text = processor.apply_chat_template(
                 messages,
@@ -239,6 +241,8 @@ def run_benchmark(args):
                 videos, video_metadatas = zip(*videos)
                 videos = list(videos)
                 video_metadatas = list(video_metadatas)
+            if idx == 0:
+                _bm_diag("inf[0] before processor")
             inputs = processor(
                 text=text,
                 images=images,
@@ -249,19 +253,37 @@ def run_benchmark(args):
                 min_pixels=768 * 28 * 28,
                 return_tensors="pt",
                 **(video_kwargs or {}),
-            ).to("cuda:0")
+            )
+            if idx == 0:
+                _bm_diag("inf[0] before .to(cuda)")
+                for k, v in inputs.items():
+                    if hasattr(v, 'shape'):
+                        print(
+                            f"  input[{k}]: "
+                            f"shape={list(v.shape)}, "
+                            f"dtype={v.dtype}, "
+                            f"dev={v.device}",
+                            flush=True,
+                        )
+            inputs = inputs.to("cuda:0")
+            if idx == 0:
+                _bm_diag("inf[0] after .to(cuda)")
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             streamer = StopWatch(moe.engine)
             streamer.start_time = time.perf_counter()
 
+            if idx == 0:
+                _bm_diag("inf[0] before moe.generate")
             generated_ids = moe.generate(
                 **inputs,
                 max_new_tokens=args.max_new_tokens,
                 do_sample=False,
                 streamer=streamer,
             )
+            if idx == 0:
+                _bm_diag("inf[0] after moe.generate")
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
