@@ -179,7 +179,7 @@ def run_benchmark(args):
                 padding=True,
                 return_tensors="pt",
                 **(video_kwargs or {}),
-            ).to(model.device)
+            ).to("cuda:0")
             _ = model.generate(**inputs, max_new_tokens=10)
         except Exception as e:
             print(f"Warmup sample {i} failed: {e}")
@@ -228,7 +228,7 @@ def run_benchmark(args):
                 min_pixels=768 * 28 * 28,
                 return_tensors="pt",
                 **(video_kwargs or {}),
-            ).to(model.device)
+            ).to("cuda:0")
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()

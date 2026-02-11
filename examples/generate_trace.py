@@ -126,7 +126,7 @@ def generate_trace(args):
                 padding=True,
                 return_tensors="pt",
                 **(video_kwargs or {}),
-            ).to(model.device)
+            ).to("cuda:0")
 
             # set up trace entries
             moe._configure_hook(inputs.input_ids)
