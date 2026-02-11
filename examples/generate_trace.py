@@ -199,7 +199,7 @@ def main():
         "--max-new-tokens", type=int, default=50
     )
     parser.add_argument(
-        "--num-samples", type=int, default=100
+        "--num-samples", type=int, default=1
     )
 
     args = parser.parse_args()
