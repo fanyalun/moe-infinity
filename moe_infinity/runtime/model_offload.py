@@ -954,6 +954,44 @@ class OffloadEngine(object):
             flush=True,
         )
 
+        # Also move non-offloaded dense params to GPU
+        # (params not in name_id_map, e.g. visual encoder)
+        extra = 0
+        for name, param in model.named_parameters(
+            recurse=True
+        ):
+            if (
+                "expert" in name
+                and "shared_expert" not in name
+            ):
+                continue
+            if param.data.data_ptr() in self.offload_set:
+                continue
+            if param.data.device.type == "cuda":
+                continue
+            param.data = param.data.to("cuda:0")
+            extra += 1
+        for name, buf in model.named_buffers(
+            recurse=True
+        ):
+            if (
+                "expert" in name
+                and "shared_expert" not in name
+            ):
+                continue
+            if buf.data.data_ptr() in self.offload_set:
+                continue
+            if buf.data.device.type == "cuda":
+                continue
+            buf.data = buf.data.to("cuda:0")
+            extra += 1
+        if extra:
+            print(
+                f"Moved {extra} non-offloaded dense "
+                f"params to GPU",
+                flush=True,
+            )
+
     def _generate_param_id(self):
         param_id = self.param_id
         self.param_id += 1
