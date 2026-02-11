@@ -370,7 +370,7 @@ def main():
     parser.add_argument(
         "--device-memory-ratio",
         type=float,
-        default=0.7,
+        default=0.09,
     )
     parser.add_argument(
         "--max-new-tokens", type=int, default=50
