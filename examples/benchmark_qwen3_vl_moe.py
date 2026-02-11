@@ -180,7 +180,7 @@ def run_benchmark(args):
                 return_tensors="pt",
                 **(video_kwargs or {}),
             ).to("cuda:0")
-            _ = model.generate(**inputs, max_new_tokens=10)
+            _ = moe.generate(**inputs, max_new_tokens=10)
         except Exception as e:
             print(f"Warmup sample {i} failed: {e}")
     print("Warmup completed")
@@ -235,7 +235,7 @@ def run_benchmark(args):
             streamer = StopWatch(moe.engine)
             streamer.start_time = time.perf_counter()
 
-            generated_ids = model.generate(
+            generated_ids = moe.generate(
                 **inputs,
                 max_new_tokens=args.max_new_tokens,
                 do_sample=False,
