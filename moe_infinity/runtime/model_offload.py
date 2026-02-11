@@ -786,9 +786,11 @@ class OffloadEngine(object):
     def setup_archer_hooks(self, model):
         registered = 0
         skipped = 0
+        skipped_names = []
         for name, param in model.named_parameters(recurse=True):
             if name not in self.name_id_map:
                 skipped += 1
+                skipped_names.append(f"param:{name}")
                 continue
             self.archer_engine.register(param.data, self.name_id_map[name])
             self.offload_set.add(param.data.data_ptr())
@@ -800,6 +802,7 @@ class OffloadEngine(object):
         for name, buffer in model.named_buffers(recurse=True):
             if name not in self.name_id_map:
                 skipped += 1
+                skipped_names.append(f"buf:{name}")
                 continue
             self.archer_engine.register(buffer.data, self.name_id_map[name])
             self.offload_set.add(buffer.data.data_ptr())
@@ -811,6 +814,9 @@ class OffloadEngine(object):
             f"offload_set size={len(self.offload_set)}",
             flush=True,
         )
+        if skipped_names:
+            for s in skipped_names:
+                print(f"  skipped: {s}", flush=True)
 
         topo = self.get_topology(model)
         self.archer_engine.set_topology(topo)
