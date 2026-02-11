@@ -192,8 +192,13 @@ class MoE:
 
         self.model.eval()
         with torch.no_grad():
-            return self.model.generate(input_ids, **kwargs)
-        self.engine.expert_dispatcher.clear_expert_cache_counts()
+            output = self.model.generate(input_ids, **kwargs)
+
+        # finish trace entries so they accumulate in trace_collection
+        for seq_id in self.seq_id_list:
+            self.engine.expert_tracer.finish_entry(seq_id)
+
+        return output
 
     def forward(self, input_ids: torch.LongTensor, *args, **kwargs) -> Any:
         """

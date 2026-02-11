@@ -91,6 +91,12 @@ class ExpertTracer:
     def get_entry(self, seq_id):
         return self.trace[seq_id]
 
+    def save_trace(self, path):
+        """Save trace_collection to a numpy file."""
+        data = self.trace_collection.cpu().numpy()
+        np.save(path, data)
+        print(f"Saved trace ({data.shape}) to {path}", flush=True)
+
     def find_most_similar(self, matrix, layer_idx) -> np.ndarray:
         # start_time = time.time()
         trace_collection_copy = self.trace_collection.clone()
