@@ -406,12 +406,22 @@ class OffloadEngine(object):
 
                     with open(name_id_map_file, "w") as f:
                         json.dump(self.name_id_map, f)
+                    print(
+                        f"[diag] name_id_map created fresh: "
+                        f"{len(self.name_id_map)} keys",
+                        flush=True,
+                    )
                 else:
                     print("Loading model from offload_path ...", flush=True)
                     self.cls.__init__ = self.cls._old_init
                     # load the name_id_map
                     with open(name_id_map_file, "r") as f:
                         self.name_id_map = json.load(f)
+                    print(
+                        f"[diag] name_id_map loaded from cache: "
+                        f"{len(self.name_id_map)} keys",
+                        flush=True,
+                    )
 
                 # print(self.name_id_map, flush=True)
 
@@ -775,20 +785,33 @@ class OffloadEngine(object):
         return topology
 
     def setup_archer_hooks(self, model):
+        registered = 0
+        skipped = 0
         for name, param in model.named_parameters(recurse=True):
             if name not in self.name_id_map:
+                skipped += 1
                 continue
             self.archer_engine.register(param.data, self.name_id_map[name])
             self.offload_set.add(param.data.data_ptr())
+            registered += 1
 
             if "shared" in name:
                 self.offload_exemption.add(param.data.data_ptr())
 
         for name, buffer in model.named_buffers(recurse=True):
             if name not in self.name_id_map:
+                skipped += 1
                 continue
             self.archer_engine.register(buffer.data, self.name_id_map[name])
             self.offload_set.add(buffer.data.data_ptr())
+            registered += 1
+
+        print(
+            f"[diag] setup_archer_hooks: "
+            f"registered={registered}, skipped={skipped}, "
+            f"offload_set size={len(self.offload_set)}",
+            flush=True,
+        )
 
         topo = self.get_topology(model)
         self.archer_engine.set_topology(topo)
@@ -948,6 +971,32 @@ class OffloadEngine(object):
             self.archer_engine.begin(prewarm_id, buf)
             self.offload_set.add(buf.data.data_ptr())
             count += 1
+
+        # Diagnostic: show dense params not in name_id_map
+        missing = []
+        for name, param in model.named_parameters(
+            recurse=True
+        ):
+            if (
+                "expert" in name
+                and "shared_expert" not in name
+            ):
+                continue
+            if name not in self.name_id_map:
+                missing.append(name)
+        if missing:
+            print(
+                f"[diag] {len(missing)} dense params "
+                f"NOT in name_id_map:",
+                flush=True,
+            )
+            for m in missing[:20]:
+                print(f"  {m}", flush=True)
+            if len(missing) > 20:
+                print(
+                    f"  ... and {len(missing)-20} more",
+                    flush=True,
+                )
 
         print(
             f"Pre-warmed {count} dense params to GPU",
