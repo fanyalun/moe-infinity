@@ -79,18 +79,27 @@ class SyncQwen3VLMoeSparseMoeBlock(nn.Module):
         )
         routing_weights = routing_weights.to(hidden_states.dtype)
 
-        # predict & prefetch
+        # trace & prefetch
         expert_index = selected_experts.reshape(
             batch_size, sequence_length, self.top_k
         )
         for i in range(batch_size):
             seq_id = self.seq_id_list[i]
-            expert_matrix = self.expert_predictor.predict(
-                seq_id, expert_index[i], self.layer_id
-            )
-            self.expert_prefetcher.prefetch_experts(
-                self.layer_id, expert_matrix
-            )
+            if getattr(self, "prefetch_enabled", False):
+                # predict calls update_entry + prefetch
+                expert_matrix = (
+                    self.expert_predictor.predict(
+                        seq_id, expert_index[i], self.layer_id
+                    )
+                )
+                self.expert_prefetcher.prefetch_experts(
+                    self.layer_id, expert_matrix
+                )
+            else:
+                # trace-only: just record activations
+                self.expert_tracer.update_entry(
+                    seq_id, expert_index[i], self.layer_id
+                )
 
         router_mask = F.one_hot(
             selected_experts, num_classes=self.num_experts
