@@ -49,6 +49,24 @@ from moe_infinity.utils.arguments import (
     copy_kwargs_to_device,
 )
 
+def _diag_gpu_mem(label):
+    if not torch.cuda.is_available():
+        return
+    torch.cuda.synchronize()
+    free, total = torch.cuda.mem_get_info(0)
+    used = (total - free) / (1024 ** 2)
+    pt_alloc = torch.cuda.memory_allocated(0) / (1024 ** 2)
+    pt_resv = torch.cuda.memory_reserved(0) / (1024 ** 2)
+    print(
+        f"[GPU-DIAG] {label}: "
+        f"nvidia-smi≈{used:.0f}MB, "
+        f"pt_alloc={pt_alloc:.0f}MB, "
+        f"pt_reserved={pt_resv:.0f}MB, "
+        f"non-pt(cudaMalloc)={used - pt_resv:.0f}MB",
+        flush=True,
+    )
+
+
 use_jit = False
 try:
     import moe_infinity.ops.prefetch.prefetch_op as prefetch_op
@@ -435,6 +453,7 @@ class OffloadEngine(object):
                     "is_flash_attn_available", False
                 )
                 # self.archer_prefetch.n_layer, self.archer_prefetch.n_expert, n_encoder_layers = parse_moe_param(self.config)
+                _diag_gpu_mem("before _from_config")
                 model = cls._from_config(
                     self.config,
                     torch_dtype=self.dtype_cls
@@ -450,7 +469,7 @@ class OffloadEngine(object):
                 if self.config.model_type == "deepseek_v3":
                     model = model.to(torch.float8_e4m3fn)
 
-                # if (
+                _diag_gpu_mem("after _from_config")
                 #     self.dtype_cls is torch.bfloat16
                 #     or self.dtype_cls is torch.float16
                 # ):
@@ -635,7 +654,23 @@ class OffloadEngine(object):
 
                         module_idx += 1
 
+                _diag_gpu_mem("before setup_archer_hooks")
                 self.setup_archer_hooks(model)
+                _diag_gpu_mem("after setup_archer_hooks")
+
+                # count model params by device
+                dev_sizes = {}
+                for n, p in model.named_parameters():
+                    d = str(p.device)
+                    s = p.data.nelement() * p.data.element_size()
+                    dev_sizes[d] = dev_sizes.get(d, 0) + s
+                for d, s in sorted(dev_sizes.items()):
+                    print(
+                        f"[GPU-DIAG] param device={d}: "
+                        f"{s / (1024**2):.1f}MB",
+                        flush=True,
+                    )
+
                 self._patch_qwen3_vl_vision(model)
                 return model
 
@@ -819,7 +854,12 @@ class OffloadEngine(object):
                 print(f"  skipped: {s}", flush=True)
 
         topo = self.get_topology(model)
+        _diag_gpu_mem("before set_topology")
         self.archer_engine.set_topology(topo)
+        _diag_gpu_mem("after set_topology (InitializeTopology)")
+        gc.collect()
+        torch.cuda.empty_cache()
+        _diag_gpu_mem("after gc+empty_cache")
 
         @torch.no_grad()
         def _pre_forward_input_hook(module, input, kwargs, device, tensors, hook_key=""):

@@ -140,12 +140,31 @@ def run_benchmark(args):
         )
     print("Model loaded")
 
+    def _bm_diag(label):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            free, total = torch.cuda.mem_get_info(0)
+            used = (total - free) / (1024 ** 2)
+            pt_a = torch.cuda.memory_allocated(0) / (1024 ** 2)
+            pt_r = torch.cuda.memory_reserved(0) / (1024 ** 2)
+            print(
+                f"[BM-DIAG] {label}: "
+                f"nvidia≈{used:.0f}MB, "
+                f"pt_alloc={pt_a:.0f}MB, "
+                f"pt_resv={pt_r:.0f}MB, "
+                f"non-pt={used - pt_r:.0f}MB",
+                flush=True,
+            )
+
+    _bm_diag("after model load")
+
     parent_dir = os.path.dirname(args.data_dir)
     img_root = os.path.join(parent_dir, "images")
     os.makedirs(img_root, exist_ok=True)
 
     # 3. Warmup
     print("Warming up...")
+    _bm_diag("before warmup")
     for i in range(min(5, len(dataset))):
         try:
             row = dataset.iloc[i]
@@ -181,8 +200,10 @@ def run_benchmark(args):
                 **(video_kwargs or {}),
             ).to("cuda:0")
             _ = moe.generate(**inputs, max_new_tokens=10)
+            _bm_diag(f"after warmup sample {i}")
         except Exception as e:
             print(f"Warmup sample {i} failed: {e}")
+    _bm_diag("after warmup (all)")
     print("Warmup completed")
 
     # 4. Inference
