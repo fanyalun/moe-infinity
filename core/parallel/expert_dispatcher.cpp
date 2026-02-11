@@ -124,12 +124,10 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
   int expert_idx = args.expert_idx;
   auto expert_node = experts_[expert_idx][layer_idx];
 
-  if (!expert_node->node->mutex.try_lock()) {
-    // NOTE: try lock must success, if there is no prefetching
-    DLOG_FATAL("ExpertDispatcher::Enqueue: mutex try_lock failed (expert_idx ",
-               expert_idx, " layer_idx ", layer_idx, "node ",
-               expert_node->node->str(), ")");
-  }
+  // Block until the node mutex is available.
+  // Prefetch may hold this mutex while transferring data to GPU;
+  // waiting here lets dispatch benefit from the completed prefetch.
+  expert_node->node->mutex.lock();
   expert_node->node->last_access_time = MCIROSECONDS_SINCE_EPOCH;
 
   if (expert_node->node->device.is_cuda()) {
