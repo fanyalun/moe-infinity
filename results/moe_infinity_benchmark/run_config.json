@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-02-11 17:31:48",
+  "timestamp": "2026-02-11 18:39:29",
   "arguments": {
     "model_path": "/data1/fanya/models/Qwen/Qwen3-VL-30B-A3B-Instruct",
     "data_dir": "/data1/fanya/datasets/mmstar/MMStar.tsv",

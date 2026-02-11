@@ -3,7 +3,7 @@
     "id": 1116,
     "question": "Hint: Please answer the question and provide the correct option letter, e.g., A, B, C, D, at the end.\nQuestion: What is the highest number of responses for Question 10, for any given % of inside sales?\nChoices:\n(A) 10\n(B) 22\n(C) 17\n(D) 34",
     "gt_answer": "C",
-    "prediction": "(C) 17"
+    "prediction": "C"
   },
   {
     "id": 1368,
@@ -15,7 +15,7 @@
     "id": 422,
     "question": "How many musical instruments are in the image?\nOptions: A: 1, B: 2, C: 4, D: 3",
     "gt_answer": "B",
-    "prediction": "D: 3"
+    "prediction": "B: 2"
   },
   {
     "id": 413,
@@ -33,7 +33,7 @@
     "id": 861,
     "question": "Hint: Please answer the question and provide the correct option letter, e.g., A, B, C, D, at the end.\nQuestion: Is Sky Blue less than Chartreuse?\nChoices:\n(A) yes\n(B) no\n(C) nan\n(D) nan",
     "gt_answer": "A",
-    "prediction": "To determine if Sky Blue is less than Chartreuse, we need to compare the sizes of their respective slices in the pie chart.\n\n1.  **Locate the slices in the legend:**\n    -   The legend on the left side of the"
+    "prediction": "A"
   },
   {
     "id": 1063,
@@ -51,7 +51,7 @@
     "id": 1272,
     "question": "which of these show reverse fault\nOptions: A: d, B: a, C: b, D: c",
     "gt_answer": "C",
-    "prediction": "To determine which diagram shows a reverse fault, let's analyze the characteristics of a reverse fault.\n\nA **reverse fault** is a type of fault where the hanging wall moves **upward** relative to the footwall. This occurs due to **compress"
+    "prediction": "B: a"
   },
   {
     "id": 259,
