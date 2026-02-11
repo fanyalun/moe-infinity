@@ -636,7 +636,6 @@ class OffloadEngine(object):
                         module_idx += 1
 
                 self.setup_archer_hooks(model)
-                self._prewarm_dense_params(model)
                 # print("OffloadEngine init done, rank", dist.get_rank(), flush=True)
                 return model
 
@@ -921,125 +920,6 @@ class OffloadEngine(object):
 
         # likely one of them should be enough but just to be safe
         self._register_hooks_recursively(model)
-
-    @torch.no_grad()
-    def _prewarm_dense_params(self, model):
-        """Pre-move dense params to GPU via begin().
-
-        After begin(), the Python tensor points to GPU memory and
-        offload_set is updated with the new data_ptr.  Forward hooks
-        will continue to call begin()/end() normally, but since
-        StopExec does not move data, dense params stay on GPU as long
-        as total dense cache stays within the 70% GPU memory limit.
-        """
-        prewarm_id = OffloadEngine.request_id
-        OffloadEngine.request_id += 1
-
-        count = 0
-        for name, param in model.named_parameters(
-            recurse=True
-        ):
-            if name not in self.name_id_map:
-                continue
-            if (
-                "expert" in name
-                and "shared_expert" not in name
-            ):
-                continue
-            old_ptr = param.data.data_ptr()
-            if old_ptr not in self.offload_set:
-                continue
-            self.offload_set.remove(old_ptr)
-            self.archer_engine.begin(prewarm_id, param)
-            self.offload_set.add(param.data.data_ptr())
-            count += 1
-
-        for name, buf in model.named_buffers(
-            recurse=True
-        ):
-            if name not in self.name_id_map:
-                continue
-            if (
-                "expert" in name
-                and "shared_expert" not in name
-            ):
-                continue
-            old_ptr = buf.data.data_ptr()
-            if old_ptr not in self.offload_set:
-                continue
-            self.offload_set.remove(old_ptr)
-            self.archer_engine.begin(prewarm_id, buf)
-            self.offload_set.add(buf.data.data_ptr())
-            count += 1
-
-        # Diagnostic: show dense params not in name_id_map
-        missing = []
-        for name, param in model.named_parameters(
-            recurse=True
-        ):
-            if (
-                "expert" in name
-                and "shared_expert" not in name
-            ):
-                continue
-            if name not in self.name_id_map:
-                missing.append(name)
-        if missing:
-            print(
-                f"[diag] {len(missing)} dense params "
-                f"NOT in name_id_map:",
-                flush=True,
-            )
-            for m in missing[:20]:
-                print(f"  {m}", flush=True)
-            if len(missing) > 20:
-                print(
-                    f"  ... and {len(missing)-20} more",
-                    flush=True,
-                )
-
-        print(
-            f"Pre-warmed {count} dense params to GPU",
-            flush=True,
-        )
-
-        # Also move non-offloaded dense params to GPU
-        # (params not in name_id_map, e.g. visual encoder)
-        extra = 0
-        for name, param in model.named_parameters(
-            recurse=True
-        ):
-            if (
-                "expert" in name
-                and "shared_expert" not in name
-            ):
-                continue
-            if param.data.data_ptr() in self.offload_set:
-                continue
-            if param.data.device.type == "cuda":
-                continue
-            param.data = param.data.to("cuda:0")
-            extra += 1
-        for name, buf in model.named_buffers(
-            recurse=True
-        ):
-            if (
-                "expert" in name
-                and "shared_expert" not in name
-            ):
-                continue
-            if buf.data.data_ptr() in self.offload_set:
-                continue
-            if buf.data.device.type == "cuda":
-                continue
-            buf.data = buf.data.to("cuda:0")
-            extra += 1
-        if extra:
-            print(
-                f"Moved {extra} non-offloaded dense "
-                f"params to GPU",
-                flush=True,
-            )
 
     def _generate_param_id(self):
         param_id = self.param_id
