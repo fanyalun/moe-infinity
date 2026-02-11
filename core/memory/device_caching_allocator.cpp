@@ -11,6 +11,7 @@
 #include <c10/util/Exception.h>
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <cuda_runtime_api.h>
+#include "utils/cuda_utils.h"
 #include "utils/logger.h"
 
 namespace c10 {
@@ -30,6 +31,12 @@ inline void* DeviceCachingAllocator::allocate_and_cache(const size_t bytes) {
     if (cuda_err != cudaSuccess) {
       // Second: free PyTorch's cached memory that competes
       // for the same GPU memory via separate cudaMalloc calls
+      size_t gpu_free = 0, gpu_total = 0;
+      cudaMemGetInfo(&gpu_free, &gpu_total);
+      DLOG_ERROR("cudaMalloc retry failed, requesting {}B, "
+                 "GPU free={}MB total={}MB",
+                 bytes, gpu_free / (1024*1024),
+                 gpu_total / (1024*1024));
       c10::cuda::CUDACachingAllocator::emptyCache();
       cuda_err = cudaMalloc(&ptr, bytes);
       if (cuda_err != cudaSuccess) {

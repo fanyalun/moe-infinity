@@ -516,6 +516,15 @@ void ArcherTopologyHandle::InitializeTopology(
 
   // Split evently dense nodes only
   if (!dense_nodes.empty()) {
+    int64_t total_dense_bytes = 0;
+    for (auto& n : dense_nodes) {
+      total_dense_bytes += n->byte_size;
+    }
+    DLOG_INFO("Dense nodes: count={}, total_size={}MB",
+              dense_nodes.size(), total_dense_bytes / (1024 * 1024));
+    DLOG_INFO("GPU free before dense load: {}MB",
+              GetFreeDeviceMemory(0) / (1024 * 1024));
+
     int num_dense_nodes_per_device =
         std::max(1, (int)std::ceil((double)dense_nodes.size() / num_gpu / 2));
     int counter = 0;
@@ -530,14 +539,29 @@ void ArcherTopologyHandle::InitializeTopology(
     }
     dense_nodes.back()->default_device =
         torch::Device(torch::kCUDA, num_gpu - 1);
+
+    DLOG_INFO("GPU free after dense load: {}MB",
+              GetFreeDeviceMemory(0) / (1024 * 1024));
+    DLOG_INFO("DeviceMemoryPool free_memory: {}MB",
+              kDeviceMemoryPool->GetFreeMemory(
+                  torch::Device(torch::kCUDA, 0)) / (1024 * 1024));
   }
 
   DLOG_INFO("Moving sparse parameters to CPU");
+  int64_t total_sparse_bytes = 0;
+  for (auto& n : sparse_nodes) {
+    total_sparse_bytes += n->byte_size;
+  }
+  DLOG_INFO("Sparse nodes: count={}, total_size={}MB",
+            sparse_nodes.size(), total_sparse_bytes / (1024 * 1024));
   for (auto& node_ptr : tqdm::tqdm(sparse_nodes)) {
     node_ptr->default_device = torch::Device(torch::kCUDA, target_device_id);
     target_device_id = (target_device_id + 1) % num_gpu;
     node_ptr->SetDevice(CPU_DEVICE, false);
   }
+  DLOG_INFO("Sparse cache limit: {}MB",
+            GetSparseCacheLimit(torch::Device(torch::kCUDA, 0))
+                / (1024 * 1024));
 
   DLOG_TRACE("InitializeTopology pipeline_.stages.size() {}",
              pipeline_.stages.size());
