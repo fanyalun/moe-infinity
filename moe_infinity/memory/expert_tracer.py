@@ -58,20 +58,29 @@ class ExpertTracer:
         )
         return seq_id
 
+    def _to_trace_tensor(self, matrix):
+        return torch.from_numpy(matrix).to(
+            self.trace_collection.device
+        )
+
     def finish_entry(self, seq_id):
         trace_sum = self.trace_collection.sum(dim=(1, 2))
 
         zero_mask = trace_sum == 0
         if zero_mask.any():
             idx = zero_mask.nonzero(as_tuple=False)[0, 0].item()
-            self.trace_collection[idx] = self.trace[seq_id].matrix
+            self.trace_collection[idx] = self._to_trace_tensor(
+                self.trace[seq_id].matrix
+            )
             self.collection_access[idx] = 1
         else:
             collection_access_copy = self.collection_access.copy()
             collection_access_copy[: self.persistent_capacity] = 1e9
 
             idx = np.argmin(collection_access_copy)
-            self.trace_collection[idx] = self.trace[seq_id].matrix
+            self.trace_collection[idx] = self._to_trace_tensor(
+                self.trace[seq_id].matrix
+            )
             self.collection_access[idx] = 1
 
     def update_entry(self, seq_id, expert_list, layer_idx):
