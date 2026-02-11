@@ -9,6 +9,7 @@
 
 #include "device_caching_allocator.h"
 #include <c10/util/Exception.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <cuda_runtime_api.h>
 #include "utils/logger.h"
 
@@ -23,11 +24,18 @@ inline void* DeviceCachingAllocator::allocate_and_cache(const size_t bytes) {
   void* ptr;
   auto cuda_err = cudaMalloc(&ptr, bytes);
   if (cuda_err != cudaSuccess) {
+    // First: free our own cached memory
     free_cached();
     cuda_err = cudaMalloc(&ptr, bytes);
     if (cuda_err != cudaSuccess) {
-      DLOG_ERROR("cudaMalloc failed", bytes, cuda_err);
-      throw std::runtime_error("cudaMalloc failed");
+      // Second: free PyTorch's cached memory that competes
+      // for the same GPU memory via separate cudaMalloc calls
+      c10::cuda::CUDACachingAllocator::emptyCache();
+      cuda_err = cudaMalloc(&ptr, bytes);
+      if (cuda_err != cudaSuccess) {
+        DLOG_ERROR("cudaMalloc failed", bytes, cuda_err);
+        throw std::runtime_error("cudaMalloc failed");
+      }
     }
   }
 
