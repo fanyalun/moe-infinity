@@ -59,15 +59,14 @@ class ExpertTracer:
         return seq_id
 
     def finish_entry(self, seq_id):
-        trace_sum = np.sum(self.trace_collection, axis=(1, 2))
+        trace_sum = self.trace_collection.sum(dim=(1, 2))
 
-        if np.any(trace_sum == 0):
-            # find the first zero entry
-            idx = np.argwhere(trace_sum == 0)[0][0]
+        zero_mask = trace_sum == 0
+        if zero_mask.any():
+            idx = zero_mask.nonzero(as_tuple=False)[0, 0].item()
             self.trace_collection[idx] = self.trace[seq_id].matrix
             self.collection_access[idx] = 1
         else:
-            # find the first entry after self.persistent_capacity that has the least access
             collection_access_copy = self.collection_access.copy()
             collection_access_copy[: self.persistent_capacity] = 1e9
 
