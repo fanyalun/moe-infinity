@@ -452,6 +452,9 @@ class OffloadEngine(object):
                 is_flash_attn_available = kwargs.get(
                     "is_flash_attn_available", False
                 )
+                attn_impl = kwargs.get("attn_implementation", None)
+                if attn_impl is None:
+                    attn_impl = "flash_attention_2" if is_flash_attn_available else "eager"
                 # self.archer_prefetch.n_layer, self.archer_prefetch.n_expert, n_encoder_layers = parse_moe_param(self.config)
                 _diag_gpu_mem("before _from_config")
                 model = cls._from_config(
@@ -459,11 +462,7 @@ class OffloadEngine(object):
                     torch_dtype=self.dtype_cls
                     if self.config.model_type != "deepseek_v3"
                     else torch.bfloat16,
-                    attn_implementation=(
-                        "flash_attention_2"
-                        if is_flash_attn_available
-                        else "eager"
-                    ),
+                    attn_implementation=attn_impl,
                 )
 
                 if self.config.model_type == "deepseek_v3":

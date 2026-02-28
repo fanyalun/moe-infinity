@@ -138,6 +138,7 @@ class MoE:
         self.engine.ckpt_files = checkpoint_paths
         # self.engine.save(config.offload_path, checkpoint_paths)
         is_flash_attn_available = False
+        attn_impl = "eager"
         try:
             import flash_attn
 
@@ -155,12 +156,18 @@ class MoE:
             print(
                 "[WARNING] FlashAttention is not available in the current environment. Using default attention."
             )
+
+        # Use sdpa for qwen3vlmoe to reduce memory usage
+        if arch == "qwen3vlmoe":
+            attn_impl = "sdpa"
+            print("[INFO] Using SDPA attention for qwen3vlmoe")
+        elif is_flash_attn_available:
+            attn_impl = "flash_attention_2"
+
         with self.engine.init(cls=model_cls, ar_config=config):
             self.model = model_cls.from_pretrained(
                 model_name_or_path,
-                attn_implementation=(
-                    "flash_attention_2" if is_flash_attn_available else "eager"
-                ),
+                attn_implementation=attn_impl,
                 is_flash_attn_available=is_flash_attn_available,
                 trust_remote_code=True,
             )
