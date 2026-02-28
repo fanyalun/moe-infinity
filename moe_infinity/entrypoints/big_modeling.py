@@ -212,8 +212,63 @@ class MoE:
         _diag = self._gen_call_count <= 6
         if _diag:
             _diag_gen(f"generate#{self._gen_call_count} before model.generate")
+
+        # one-shot hooks to trace memory per component
+        _handles = []
+        if self._gen_call_count == 6:
+            _call_idx = [0]
+            def _mem_pre(name):
+                def hook(mod, args, kwargs=None):
+                    _call_idx[0] += 1
+                    if _call_idx[0] <= 3:
+                        torch.cuda.synchronize()
+                        peak = torch.cuda.max_memory_allocated(0)/(1024**2)
+                        cur = torch.cuda.memory_allocated(0)/(1024**2)
+                        resv = torch.cuda.memory_reserved(0)/(1024**2)
+                        print(
+                            f"[FWD-DIAG] >> {name} call#{_call_idx[0]}: "
+                            f"alloc={cur:.0f}MB peak={peak:.0f}MB "
+                            f"resv={resv:.0f}MB",
+                            flush=True,
+                        )
+                return hook
+            def _mem_post(name):
+                def hook(mod, inp, out):
+                    if _call_idx[0] <= 3:
+                        torch.cuda.synchronize()
+                        peak = torch.cuda.max_memory_allocated(0)/(1024**2)
+                        cur = torch.cuda.memory_allocated(0)/(1024**2)
+                        resv = torch.cuda.memory_reserved(0)/(1024**2)
+                        print(
+                            f"[FWD-DIAG] << {name} call#{_call_idx[0]}: "
+                            f"alloc={cur:.0f}MB peak={peak:.0f}MB "
+                            f"resv={resv:.0f}MB",
+                            flush=True,
+                        )
+                return hook
+            torch.cuda.reset_peak_memory_stats(0)
+            for tag, attr in [
+                ("visual", "visual"),
+                ("lang_model", "language_model"),
+                ("lm_head", "language_model.lm_head"),
+            ]:
+                mod = self.model
+                for a in attr.split("."):
+                    mod = getattr(mod, a, None)
+                    if mod is None:
+                        break
+                if mod is not None:
+                    _handles.append(mod.register_forward_pre_hook(
+                        _mem_pre(tag), with_kwargs=True))
+                    _handles.append(mod.register_forward_hook(
+                        _mem_post(tag)))
+
         with torch.no_grad():
             output = self.model.generate(input_ids, **kwargs)
+
+        for h in _handles:
+            h.remove()
+
         if _diag:
             _diag_gen(f"generate#{self._gen_call_count} after model.generate")
 

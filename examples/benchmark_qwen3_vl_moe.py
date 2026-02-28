@@ -4,9 +4,6 @@ import os
 import sys
 import time
 
-# verify: PyTorch expandable segments to bypass fragmentation
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
 import torch
 from tqdm import tqdm
 from transformers import AutoProcessor
