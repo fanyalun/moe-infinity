@@ -49,23 +49,6 @@ from moe_infinity.utils.arguments import (
     copy_kwargs_to_device,
 )
 
-def _diag_gpu_mem(label):
-    if not torch.cuda.is_available():
-        return
-    torch.cuda.synchronize()
-    free, total = torch.cuda.mem_get_info(0)
-    used = (total - free) / (1024 ** 2)
-    pt_alloc = torch.cuda.memory_allocated(0) / (1024 ** 2)
-    pt_resv = torch.cuda.memory_reserved(0) / (1024 ** 2)
-    print(
-        f"[GPU-DIAG] {label}: "
-        f"nvidia-smi≈{used:.0f}MB, "
-        f"pt_alloc={pt_alloc:.0f}MB, "
-        f"pt_reserved={pt_resv:.0f}MB, "
-        f"non-pt(cudaMalloc)={used - pt_resv:.0f}MB",
-        flush=True,
-    )
-
 
 use_jit = False
 try:
@@ -424,22 +407,12 @@ class OffloadEngine(object):
 
                     with open(name_id_map_file, "w") as f:
                         json.dump(self.name_id_map, f)
-                    print(
-                        f"[diag] name_id_map created fresh: "
-                        f"{len(self.name_id_map)} keys",
-                        flush=True,
-                    )
                 else:
                     print("Loading model from offload_path ...", flush=True)
                     self.cls.__init__ = self.cls._old_init
                     # load the name_id_map
                     with open(name_id_map_file, "r") as f:
                         self.name_id_map = json.load(f)
-                    print(
-                        f"[diag] name_id_map loaded from cache: "
-                        f"{len(self.name_id_map)} keys",
-                        flush=True,
-                    )
 
                 # print(self.name_id_map, flush=True)
 
@@ -456,7 +429,6 @@ class OffloadEngine(object):
                 if attn_impl is None:
                     attn_impl = "flash_attention_2" if is_flash_attn_available else "eager"
                 # self.archer_prefetch.n_layer, self.archer_prefetch.n_expert, n_encoder_layers = parse_moe_param(self.config)
-                _diag_gpu_mem("before _from_config")
                 model = cls._from_config(
                     self.config,
                     torch_dtype=self.dtype_cls
@@ -468,7 +440,6 @@ class OffloadEngine(object):
                 if self.config.model_type == "deepseek_v3":
                     model = model.to(torch.float8_e4m3fn)
 
-                _diag_gpu_mem("after _from_config")
                 #     self.dtype_cls is torch.bfloat16
                 #     or self.dtype_cls is torch.float16
                 # ):
@@ -653,22 +624,7 @@ class OffloadEngine(object):
 
                         module_idx += 1
 
-                _diag_gpu_mem("before setup_archer_hooks")
                 self.setup_archer_hooks(model)
-                _diag_gpu_mem("after setup_archer_hooks")
-
-                # count model params by device
-                dev_sizes = {}
-                for n, p in model.named_parameters():
-                    d = str(p.device)
-                    s = p.data.nelement() * p.data.element_size()
-                    dev_sizes[d] = dev_sizes.get(d, 0) + s
-                for d, s in sorted(dev_sizes.items()):
-                    print(
-                        f"[GPU-DIAG] param device={d}: "
-                        f"{s / (1024**2):.1f}MB",
-                        flush=True,
-                    )
 
                 self._patch_qwen3_vl_vision(model)
                 return model
@@ -818,47 +774,25 @@ class OffloadEngine(object):
         return topology
 
     def setup_archer_hooks(self, model):
-        registered = 0
-        skipped = 0
-        skipped_names = []
         for name, param in model.named_parameters(recurse=True):
             if name not in self.name_id_map:
-                skipped += 1
-                skipped_names.append(f"param:{name}")
                 continue
             self.archer_engine.register(param.data, self.name_id_map[name])
             self.offload_set.add(param.data.data_ptr())
-            registered += 1
 
             if "shared" in name:
                 self.offload_exemption.add(param.data.data_ptr())
 
         for name, buffer in model.named_buffers(recurse=True):
             if name not in self.name_id_map:
-                skipped += 1
-                skipped_names.append(f"buf:{name}")
                 continue
             self.archer_engine.register(buffer.data, self.name_id_map[name])
             self.offload_set.add(buffer.data.data_ptr())
-            registered += 1
-
-        print(
-            f"[diag] setup_archer_hooks: "
-            f"registered={registered}, skipped={skipped}, "
-            f"offload_set size={len(self.offload_set)}",
-            flush=True,
-        )
-        if skipped_names:
-            for s in skipped_names:
-                print(f"  skipped: {s}", flush=True)
 
         topo = self.get_topology(model)
-        _diag_gpu_mem("before set_topology")
         self.archer_engine.set_topology(topo)
-        _diag_gpu_mem("after set_topology (InitializeTopology)")
         gc.collect()
         torch.cuda.empty_cache()
-        _diag_gpu_mem("after gc+empty_cache")
 
         @torch.no_grad()
         def _pre_forward_input_hook(module, input, kwargs, device, tensors, hook_key=""):
@@ -1074,26 +1008,12 @@ class OffloadEngine(object):
             count[0] = count[0] + 1
             self._register_hooks_recursively(child, count=count)
 
-        _hook_diag_budget = [20]  # mutable counter
-
         @torch.no_grad()
         def _pre_forward_module_hook(module, args, kwargs):
             device_list = []
 
             for name, param in module.named_parameters(recurse=False):
                 if param.data.data_ptr() not in self.offload_set:
-                    sz = param.data.nelement() * param.data.element_size()
-                    if sz > 1024 and _hook_diag_budget[0] > 0:
-                        _hook_diag_budget[0] -= 1
-                        print(
-                            f"[HOOK-DIAG] .to(cuda) "
-                            f"mod={module.__class__.__name__} "
-                            f"param={name} "
-                            f"shape={list(param.data.shape)} "
-                            f"dev={param.data.device} "
-                            f"bytes={sz}",
-                            flush=True,
-                        )
                     num_devices = torch.cuda.device_count()
                     param.data = param.data.to(
                         f"cuda:{num_devices-1}"
