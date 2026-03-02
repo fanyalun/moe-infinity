@@ -355,7 +355,7 @@ def main():
         default="/data1/fanya/models/Qwen/Qwen3-VL-30B-A3B-Instruct",
     )
     parser.add_argument(
-        "--data-dir", type=str, default="/data1/fanya/datasets/mmstar/MMStar.tsv"
+        "--data-dir", type=str, default="/data1/fanya/datasets/realworldqa/data"
     )
     parser.add_argument(
         "--output-dir", type=str, default="./results/moe_infinity_benchmark",
@@ -374,10 +374,10 @@ def main():
         default=0.09,
     )
     parser.add_argument(
-        "--max-new-tokens", type=int, default=50
+        "--max-new-tokens", type=int, default=2048
     )
     parser.add_argument(
-        "--num-samples", type=int, default=20
+        "--num-samples", type=int, default=100
     )
 
     args = parser.parse_args()

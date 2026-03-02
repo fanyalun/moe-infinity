@@ -1,16 +1,16 @@
 #!/bin/bash
 # MoE-Infinity Comparison Benchmark
-# 使用与 qwen3_vl_moe_test 相同的配置进行对比测试
+# 使用与 run_inference_offload.py 相同的配置进行对比测试
 
 set -e
 
 # 配置参数（与参考脚本保持一致）
 MODEL_PATH="/data1/fanya/models/Qwen/Qwen3-VL-30B-A3B-Instruct"
-DATA_DIR="/data1/fanya/datasets/realworldqa/realworldQA.tsv"
+DATA_DIR="/data1/fanya/datasets/realworldqa/data"
 OFFLOAD_PATH="$HOME/moe-infinity-qwen3vl"
-OUTPUT_DIR="./results/moe_infinity_comparison"
-MAX_NEW_TOKENS=50
-NUM_SAMPLES=20
+OUTPUT_DIR="./results/moe_infinity_benchmark"
+MAX_NEW_TOKENS=2048
+NUM_SAMPLES=100
 DEVICE_MEMORY_RATIO=0.09
 
 # 设置 GPU
