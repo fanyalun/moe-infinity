@@ -261,7 +261,10 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
                                  fetch_streams_[gpu_id]);
     expert_node->node->incache_visit_count += 1;
     expert_node->SetTensorsFromBlob(device);
-    cache_sizes_[gpu_id] -= expert_node->node->byte_size;
+    // Only decrease cache_sizes_ on cache miss (when new GPU memory is allocated)
+    if (!cache_hit) {
+      cache_sizes_[gpu_id] -= expert_node->node->byte_size;
+    }
     // std::cerr << "ExpertDispatcher::GPUFetchFunc: move to device gpu_id "
     //           << gpu_id << " layer_idx " << layer_idx << " expert_idx "
     //           << expert_idx << " node "
