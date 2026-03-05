@@ -3,136 +3,113 @@ import torch
 class HybridStats:
     """
     用于统计 Cache 命中率的全局静态类。
-    [性能优化版]: 异步记录 + 细分 Decode/Prefill 统计
     """
-    # 存储异步记录
-    _async_records = []
+    # 全局统计
+    total_hits = 0
+    total_queries = 0
+    
+    # 模态细分统计
+    vision_hits = 0
+    vision_total = 0
+    
+    text_hits = 0
+    text_total = 0
+    
+    # 记录层级信息 (可选，用于 debug)
+    layer_stats = {}
 
     @classmethod
     def reset(cls):
-        cls._async_records = []
+        cls.total_hits = 0
+        cls.total_queries = 0
+        cls.vision_hits = 0
+        cls.vision_total = 0
+        cls.text_hits = 0
+        cls.text_total = 0
+        cls.layer_stats = {}
 
     @classmethod
-    def update(cls, layer_id, query_count, 
-               online_hits_tensor=None, 
-               offline_vision_hits_tensor=None, 
-               offline_text_hits_tensor=None,
-               is_decode=False):
+    def update(cls, layer_id, hits, queries, vision_stats=None, text_stats=None):
         """
-        [非阻塞更新]
-        :param query_count: 本次 Batch 实际参与检索的 slot 总数 (已扣除被 Mask 掉的部分)
-        :param is_decode: 是否为 Decode 阶段 (用于计算 Online Rate)
+        更新统计信息
+        :param layer_id: 当前层 ID
+        :param hits: 本次 batch 的总命中数 (TopK - KeepK 部分)
+        :param queries: 本次 batch 的总查询数 (TopK - KeepK 部分)
+        :param vision_stats: (vision_hits, vision_queries) tuple
+        :param text_stats: (text_hits, text_queries) tuple
         """
-        cls._async_records.append({
-            "id": layer_id,
-            "queries": query_count, 
-            "on_hits": online_hits_tensor,        # 0-dim Tensor
-            "off_v_hits": offline_vision_hits_tensor, # 0-dim Tensor
-            "off_t_hits": offline_text_hits_tensor,    # 0-dim Tensor
-            "is_decode": is_decode
-        })
-
-    @classmethod
-    def _synchronize_and_aggregate(cls):
-        """
-        [同步点] 聚合所有统计数据
-        """
-        stats = {
-            "total_queries": 0,    # 有效总查询数 (Prefill + Decode)
-            "decode_queries": 0,   # Decode 阶段查询数 (用于 Online Rate)
-            "online_hits": 0,
-            "offline_vision_hits": 0,
-            "offline_text_hits": 0,
-            "layer_stats": {}
-        }
+        # 1. 更新全局
+        cls.total_hits += hits
+        cls.total_queries += queries
         
-        for record in cls._async_records:
-            lid = record["id"]
-            q = record["queries"]
-            is_dec = record["is_decode"]
+        # 2. 更新 Vision
+        if vision_stats is not None:
+            v_hits, v_total = vision_stats
+            cls.vision_hits += v_hits
+            cls.vision_total += v_total
             
-            # 同步获取数值
-            on_h = record["on_hits"].item() if record["on_hits"] is not None else 0
-            off_v = record["off_v_hits"].item() if record["off_v_hits"] is not None else 0
-            off_t = record["off_t_hits"].item() if record["off_t_hits"] is not None else 0
-            
-            # 全局累加
-            stats["total_queries"] += q
-            if is_dec:
-                stats["decode_queries"] += q
+        # 3. 更新 Text
+        if text_stats is not None:
+            t_hits, t_total = text_stats
+            cls.text_hits += t_hits
+            cls.text_total += t_total
 
-            stats["online_hits"] += on_h
-            stats["offline_vision_hits"] += off_v
-            stats["offline_text_hits"] += off_t
-            
-            # 层级累加
-            if lid not in stats["layer_stats"]:
-                stats["layer_stats"][lid] = {
-                    "queries": 0, "decode_queries": 0, 
-                    "on": 0, "off_v": 0, "off_t": 0
-                }
-            stats["layer_stats"][lid]["queries"] += q
-            if is_dec:
-                stats["layer_stats"][lid]["decode_queries"] += q
-            stats["layer_stats"][lid]["on"] += on_h
-            stats["layer_stats"][lid]["off_v"] += off_v
-            stats["layer_stats"][lid]["off_t"] += off_t
-            
-        return stats
+        # 4. (可选) 更新层级统计
+        if layer_id not in cls.layer_stats:
+            cls.layer_stats[layer_id] = {"hits": 0, "total": 0}
+        cls.layer_stats[layer_id]["hits"] += hits
+        cls.layer_stats[layer_id]["total"] += queries
 
     @classmethod
     def get_summary(cls):
-        stats = cls._synchronize_and_aggregate()
+        """
+        获取格式化的统计字符串 (用于打印)
+        """
+        # Global Rate
+        global_rate = (cls.total_hits / cls.total_queries * 100) if cls.total_queries > 0 else 0.0
         
-        # 1. Global Rate (全阶段两模态命中率)
-        # 分母: Total Valid Queries (已扣除 Prefill 强制重算的 Token)
-        # 分子: Online + Offline Hits (如你所要求，包含 Online 命中的部分)
-        total_q = stats["total_queries"] if stats["total_queries"] > 0 else 1
-        total_hits = stats["online_hits"] + stats["offline_vision_hits"] + stats["offline_text_hits"]
-        global_rate = total_hits / total_q * 100
+        # Vision Rate
+        vision_rate = (cls.vision_hits / cls.vision_total * 100) if cls.vision_total > 0 else 0.0
         
-        # 2. Online Rate (在线命中率)
-        # 分母: 仅 Decode Queries (因为 Prefill 不使用 Online Cache)
-        decode_q = stats["decode_queries"] if stats["decode_queries"] > 0 else 1
-        on_rate = stats["online_hits"] / decode_q * 100
-        
-        # 3. Breakdown (辅助参考)
-        off_v_rate = stats["offline_vision_hits"] / total_q * 100
-        off_t_rate = stats["offline_text_hits"] / total_q * 100
+        # Text Rate
+        text_rate = (cls.text_hits / cls.text_total * 100) if cls.text_total > 0 else 0.0
         
         return (
-            f"[Cache Stats]\n"
-            f"  Global Rate : {global_rate:.2f}% ({total_hits}/{stats['total_queries']}) [Incl. Online]\n"
-            f"  Online Rate : {on_rate:.2f}% ({stats['online_hits']}/{stats['decode_queries']}) [Decode Only]\n"
-            f"  Offline Vis : {off_v_rate:.2f}%\n"
-            f"  Offline Txt : {off_t_rate:.2f}%"
+            f"[Cache Stats] "
+            f"Global: {global_rate:.2f}% ({cls.total_hits}/{cls.total_queries}) | "
+            f"Vision: {vision_rate:.2f}% | "
+            f"Text: {text_rate:.2f}%"
         )
 
     @classmethod
     def print_summary(cls):
         print(cls.get_summary())
 
+    # === [Fix] 新增此方法 ===
     @classmethod
     def get_metrics_dict(cls):
-        stats = cls._synchronize_and_aggregate()
-        total_q = stats["total_queries"] if stats["total_queries"] > 0 else 1
-        decode_q = stats["decode_queries"] if stats["decode_queries"] > 0 else 1
+        """
+        返回字典格式的统计信息 (用于 JSON 保存)
+        """
+        global_rate = (cls.total_hits / cls.total_queries) if cls.total_queries > 0 else 0.0
+        vision_rate = (cls.vision_hits / cls.vision_total) if cls.vision_total > 0 else 0.0
+        text_rate = (cls.text_hits / cls.text_total) if cls.text_total > 0 else 0.0
 
         return {
             "global": {
-                "hits": stats["online_hits"] + stats["offline_vision_hits"] + stats["offline_text_hits"],
-                "total": stats["total_queries"],
-                "rate": (stats["online_hits"] + stats["offline_vision_hits"] + stats["offline_text_hits"]) / total_q
+                "hits": cls.total_hits,
+                "total": cls.total_queries,
+                "rate": global_rate
             },
-            "online": {
-                "hits": stats["online_hits"],
-                "total": stats["decode_queries"],
-                "rate": stats["online_hits"] / decode_q
+            "vision": {
+                "hits": cls.vision_hits,
+                "total": cls.vision_total,
+                "rate": vision_rate
             },
-            "breakdown": {
-                "online_hits": stats["online_hits"],
-                "offline_vision_hits": stats["offline_vision_hits"],
-                "offline_text_hits": stats["offline_text_hits"]
+            "text": {
+                "hits": cls.text_hits,
+                "total": cls.text_total,
+                "rate": text_rate
             },
-            "layer_stats": stats["layer_stats"]
+            "layer_stats": cls.layer_stats
         }

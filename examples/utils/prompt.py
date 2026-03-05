@@ -1,134 +1,279 @@
-import pandas as pd
-import os
+import ast
 import base64
 import hashlib
-from PIL import Image
 import io
+import os
+
+import pandas as pd
+from PIL import Image
+
+
+def _is_valid(val):
+    return pd.notna(val) and str(val).strip() != ''
+
+
+def _safe_text(val, default=''):
+    if _is_valid(val):
+        return str(val)
+    return default
+
 
 def dump_image(line, img_root):
     os.makedirs(img_root, exist_ok=True)
-    tgt_path = []
-    
-    if 'image' in line and pd.notna(line['image']):
+    output_paths = []
+
+    image_paths = []
+    if 'image_path' in line and _is_valid(line['image_path']):
+        raw = line['image_path']
+        if isinstance(raw, list):
+            image_paths = [str(x) for x in raw]
+        else:
+            image_paths = [str(raw)]
+
+    def _resolve_path(path_str):
+        if os.path.isabs(path_str) and os.path.exists(path_str):
+            return path_str
+        return os.path.join(img_root, path_str)
+
+    if 'image' in line and _is_valid(line['image']):
         val = line['image']
-        
-        def save_img(img_val, idx=None):
-            """Save image with content-based hash filename to avoid duplicates"""
+
+        def save_img(img_val, idx=0):
             try:
                 img_bytes = None
-                # Handle dict with bytes
                 if isinstance(img_val, dict) and 'bytes' in img_val:
                     img_bytes = img_val['bytes']
-                # Handle bytes directly
                 elif isinstance(img_val, bytes):
                     img_bytes = img_val
-                # Handle base64 string
                 elif isinstance(img_val, str):
+                    raw_s = img_val
+                    s = raw_s
+                    if s.startswith('data:image'):
+                        s = s.split(',', 1)[1]
                     try:
-                        # Remove data URI prefix if present
-                        if img_val.startswith('data:image'):
-                            img_val = img_val.split(',', 1)[1]
-                        img_bytes = base64.b64decode(img_val)
+                        img_bytes = base64.b64decode(s)
                     except Exception:
-                        # If not base64, might be a URL or file path - return as is
-                        return img_val
-                
-                if img_bytes:
-                    # Use MD5 hash of image content as filename
+                        return _resolve_path(raw_s)
+
+                if img_bytes is None:
+                    return None
+
+                if idx < len(image_paths):
+                    filename = os.path.basename(image_paths[idx])
+                    save_path = os.path.join(img_root, filename)
+                else:
                     img_hash = hashlib.md5(img_bytes).hexdigest()
-                    path = os.path.join(img_root, f"{img_hash}.png")
-                    
-                    # Only save if not already exists (deduplication)
-                    if not os.path.exists(path):
-                        try:
-                            image = Image.open(io.BytesIO(img_bytes))
-                            image = image.convert('RGB')  # 转换为RGB以处理某些格式问题
-                            image.save(path)
-                        except (IOError, OSError) as e:
-                            # 处理图像加载失败
-                            print(f"Warning: Failed to load/save image: {e}")
-                            return None
-                    
-                    return path
-                    
-            except Exception as e:
-                print(f"Warning: Failed to save image: {e}")
-            return None
+                    save_path = os.path.join(img_root, f"{img_hash}.png")
+
+                if not os.path.exists(save_path):
+                    try:
+                        image = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+                        image.save(save_path)
+                    except Exception:
+                        if isinstance(img_val, str):
+                            return _resolve_path(img_val)
+                        raise
+                return save_path
+            except Exception as exc:
+                print(f"Warning: failed to save image: {exc}")
+                return None
 
         if isinstance(val, list):
-            for i, v in enumerate(val):
-                p = save_img(v, i)
-                if p: tgt_path.append(p)
+            for i, item in enumerate(val):
+                p = save_img(item, i)
+                if p:
+                    output_paths.append(p)
         else:
-            p = save_img(val)
-            if p: tgt_path.append(p)
-            
-    return tgt_path
+            p = save_img(val, 0)
+            if p:
+                output_paths.append(p)
+
+    elif image_paths:
+        for path in image_paths:
+            output_paths.append(_resolve_path(path))
+
+    return output_paths
+
+
+def _extract_options(line):
+    return {
+        key: line.get(key)
+        for key in ['A', 'B', 'C', 'D', 'E', 'F']
+        if key in line and _is_valid(line.get(key))
+    }
+
+
+def _build_mcq_text(question, options=None, hint=None):
+    prompt = ''
+    if _is_valid(hint):
+        prompt += f"Hint: {str(hint)}\n"
+    prompt += f"Question: {question}\n"
+
+    if options:
+        prompt += 'Options:\n'
+        for key, val in options.items():
+            if _is_valid(val):
+                prompt += f"{key}. {str(val)}\n"
+        prompt += 'Answer with the option letter only.'
+
+    return prompt.rstrip()
+
+
+def _build_yorn_text(question):
+    return f"{question} Please answer yes or no."
+
+
+def _build_vlmeval_message(image_paths, text):
+    msgs = []
+    if isinstance(image_paths, list):
+        msgs.extend([{'type': 'image', 'value': p} for p in image_paths])
+    elif image_paths:
+        msgs.append({'type': 'image', 'value': image_paths})
+    msgs.append({'type': 'text', 'value': text})
+    return msgs
+
+
+def _to_hf_chat_messages(vlmeval_msgs):
+    content = []
+    for item in vlmeval_msgs:
+        if item['type'] == 'image':
+            content.append({'type': 'image', 'image': item['value']})
+        elif item['type'] == 'text':
+            content.append({'type': 'text', 'text': item['value']})
+    return [{'role': 'user', 'content': content}]
+
+
+# -------------------------
+# Unified VLMEval-aligned builders (same for qwen3vl / deepseekvl2)
+# Return format: list[{'type': ..., 'value': ...}]
+# -------------------------
+
+def build_mmbench_prompt_vlmeval(line, img_root):
+    images = dump_image(line, img_root)
+    text = _build_mcq_text(
+        _safe_text(line.get('question')),
+        options=_extract_options(line),
+        hint=line.get('hint', None),
+    )
+    return _build_vlmeval_message(images, text)
+
+
+def build_realworldqa_prompt_vlmeval(line, img_root):
+    images = dump_image(line, img_root)
+    text = _build_mcq_text(
+        _safe_text(line.get('question')),
+        options=_extract_options(line),
+        hint=line.get('hint', None),
+    )
+    return _build_vlmeval_message(images, text)
+
+
+def build_ai2d_prompt_vlmeval(line, img_root):
+    images = dump_image(line, img_root)
+    text = _build_mcq_text(
+        _safe_text(line.get('question')),
+        options=_extract_options(line),
+        hint=None,
+    )
+    return _build_vlmeval_message(images, text)
+
+
+def build_scienceqa_prompt_vlmeval(line, img_root):
+    images = dump_image(line, img_root)
+    text = _build_mcq_text(
+        _safe_text(line.get('question')),
+        options=_extract_options(line),
+        hint=line.get('hint', None),
+    )
+    return _build_vlmeval_message(images, text)
+
+
+def build_hallusionbench_prompt_vlmeval(line, img_root):
+    images = dump_image(line, img_root)
+    text = _build_yorn_text(_safe_text(line.get('question')))
+    return _build_vlmeval_message(images, text)
+
+
+def build_mme_prompt_vlmeval(line, img_root):
+    images = dump_image(line, img_root)
+    text = _build_yorn_text(_safe_text(line.get('question')))
+    return _build_vlmeval_message(images, text)
+
+
+def build_pope_prompt_vlmeval(line, img_root):
+    images = dump_image(line, img_root)
+    text = _build_yorn_text(_safe_text(line.get('question')))
+    return _build_vlmeval_message(images, text)
+
+
+# -------------------------
+# Model-specific aliases (merged; no duplicated implementations)
+# -------------------------
+
+build_mmbench_prompt_qwen3vl = build_mmbench_prompt_vlmeval
+build_realworldqa_prompt_qwen3vl = build_realworldqa_prompt_vlmeval
+build_ai2d_prompt_qwen3vl = build_ai2d_prompt_vlmeval
+build_scienceqa_prompt_qwen3vl = build_scienceqa_prompt_vlmeval
+build_hallusionbench_prompt_qwen3vl = build_hallusionbench_prompt_vlmeval
+build_mme_prompt_qwen3vl = build_mme_prompt_vlmeval
+build_pope_prompt_qwen3vl = build_pope_prompt_vlmeval
+
+build_mmbench_prompt_deepseekvl2 = build_mmbench_prompt_vlmeval
+build_realworldqa_prompt_deepseekvl2 = build_realworldqa_prompt_vlmeval
+build_ai2d_prompt_deepseekvl2 = build_ai2d_prompt_vlmeval
+build_scienceqa_prompt_deepseekvl2 = build_scienceqa_prompt_vlmeval
+build_hallusionbench_prompt_deepseekvl2 = build_hallusionbench_prompt_vlmeval
+build_mme_prompt_deepseekvl2 = build_mme_prompt_vlmeval
+build_pope_prompt_deepseekvl2 = build_pope_prompt_vlmeval
+
+
+# -------------------------
+# Backward-compatible wrappers for current test_sim_reuse pipeline
+# Return format: HF chat template style (role/content)
+# -------------------------
 
 def build_mmbench_prompt(line, img_root):
-    """Build prompt for MMBench"""
-    question = f"Question: {str(line.get('question', ''))}"
-    hint = str(line.get('hint', ''))
-    
-    # 如果有 hint，拼接到 question 前面
-    if pd.notna(hint) and hint != 'nan' and hint.strip():
-        question = f"Hint: {hint}\n{question}"
-        
-    options = []
-    for char in ['A', 'B', 'C', 'D', 'E', 'F']:
-        if char in line and pd.notna(line[char]):
-            val = str(line[char])
-            options.append(f"{char}. {val}")
-    
-    option_str = "\n".join(options)
-    
-    prompt = f"{question}\nOptions:\n{option_str}\nAnswer with the option's letter from the given choices directly.\nAnswer:"
-    
-    # Handle image
-    image_paths = []
-    if 'image' in line and pd.notna(line['image']):
-        image_paths = dump_image(line, img_root)
-        
-    content = []
-    for img_path in image_paths:
-        content.append({"type": "image", "image": img_path})
-    
-    content.append({"type": "text", "text": prompt})
-    
-    messages = [{"role": "user", "content": content}]
-    return messages
+    return _to_hf_chat_messages(build_mmbench_prompt_vlmeval(line, img_root))
 
-def build_mmstar_prompt(line, img_root):    
-    """Build prompt for MMStar"""
-    image_paths = dump_image(line, img_root)
-    question = line['question']
-    prompt = f"{question}\nAnswer with the option letter only.\nThe answer is:"
-    
-    content = []
-    for image_path in image_paths:
-        content.append({"type": "image", "image": image_path})
-    
-    content.append({"type": "text", "text": prompt})
-    
-    messages = [{"role": "user", "content": content}]
-    return messages
 
 def build_realworldqa_prompt(line, img_root):
-    """Build prompt for RealWordQA"""
-    image_paths = dump_image(line, img_root)
-    question = line['question']
-    # RealWordQA questions usually include options like "A. ... B. ..."
-    prompt = f"Question: {question}\nAnswer:"
-    
-    content = []
-    for image_path in image_paths:
-        content.append({"type": "image", "image": image_path})
-    
-    content.append({"type": "text", "text": prompt})
-    
-    messages = [{"role": "user", "content": content}]
-    return messages
+    return _to_hf_chat_messages(build_realworldqa_prompt_vlmeval(line, img_root))
 
 
+def build_ai2d_prompt(line, img_root):
+    return _to_hf_chat_messages(build_ai2d_prompt_vlmeval(line, img_root))
 
 
+def build_scienceqa_prompt(line, img_root):
+    return _to_hf_chat_messages(build_scienceqa_prompt_vlmeval(line, img_root))
+
+
+def build_hallusionbench_prompt(line, img_root):
+    return _to_hf_chat_messages(build_hallusionbench_prompt_vlmeval(line, img_root))
+
+
+def build_mme_prompt(line, img_root):
+    return _to_hf_chat_messages(build_mme_prompt_vlmeval(line, img_root))
+
+
+def build_pope_prompt(line, img_root):
+    return _to_hf_chat_messages(build_pope_prompt_vlmeval(line, img_root))
+
+
+# optional backward compatibility for old experiments
+def build_mathvision_prompt(line, img_root):
+    images = dump_image(line, img_root)
+    question = _safe_text(line.get('question'))
+    options = {}
+    if 'choices' in line and _is_valid(line['choices']):
+        try:
+            parsed = ast.literal_eval(str(line['choices']))
+            if isinstance(parsed, (list, tuple)):
+                for i, v in enumerate(parsed[:6]):
+                    options[chr(ord('A') + i)] = v
+        except Exception:
+            pass
+    if not options:
+        options = _extract_options(line)
+    text = _build_mcq_text(question, options=options, hint=None)
+    return _to_hf_chat_messages(_build_vlmeval_message(images, text))

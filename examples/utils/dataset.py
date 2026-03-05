@@ -1,53 +1,126 @@
 import os
 import pandas as pd
 
-def load_realworldqa_dataset(data_dir):
-    """Load RealWordQA dataset from parquet files"""
-    if not os.path.exists(data_dir):
-        raise FileNotFoundError(f"Dataset directory {data_dir} not found.")
-    
-    data_path = os.path.join(data_dir, "data")
+
+def _load_table_file(data_path: str) -> pd.DataFrame:
     if not os.path.exists(data_path):
-        # Try looking directly in data_dir
-        data_path = data_dir
-        
+        raise FileNotFoundError(f"Dataset file not found: {data_path}")
+
+    lower = data_path.lower()
+    if lower.endswith('.tsv'):
+        sep = '\t'
+    elif lower.endswith('.csv'):
+        sep = ','
+    else:
+        sep = '\t'
+
+    df = pd.read_csv(data_path, sep=sep)
+
+    if 'index' not in df.columns:
+        if 'id' in df.columns:
+            df['index'] = df['id']
+        else:
+            df['index'] = df.index
+
+    if 'id' not in df.columns:
+        df['id'] = df['index']
+
+    df = _normalize_image_references(df)
+    return df
+
+
+def _normalize_image_references(df: pd.DataFrame) -> pd.DataFrame:
+    """Align with VLMEvalKit behavior: resolve short image refs via index->image map."""
+    if 'image' not in df.columns or 'index' not in df.columns:
+        return df
+
+    image_map = {str(idx): str(img) for idx, img in zip(df['index'], df['image'])}
+    normalized = []
+    for idx in df['index']:
+        key = str(idx)
+        val = image_map.get(key, '')
+        if len(val) <= 64 and val in image_map and len(image_map[val]) > 64:
+            val = image_map[val]
+        normalized.append(val)
+
+    df['image'] = normalized
+    return df
+
+
+def _load_parquet_dir(data_dir: str) -> pd.DataFrame:
+    data_path = os.path.join(data_dir, 'data') if os.path.isdir(os.path.join(data_dir, 'data')) else data_dir
+    if not os.path.isdir(data_path):
+        raise FileNotFoundError(f"Parquet directory not found: {data_path}")
+
     files = [os.path.join(data_path, f) for f in os.listdir(data_path) if f.endswith('.parquet')]
-    
     if not files:
         raise FileNotFoundError(f"No parquet files found in {data_path}")
-        
+
     dfs = []
-    for f in files:
+    for fp in files:
         try:
-            df = pd.read_parquet(f)
-            dfs.append(df)
-        except Exception as e:
-            print(f"Error reading {f}: {e}")
-            
+            dfs.append(pd.read_parquet(fp))
+        except Exception as exc:
+            print(f"Warning: skip unreadable parquet file {fp}: {exc}")
+
     if not dfs:
         return pd.DataFrame()
-        
-    data = pd.concat(dfs, ignore_index=True)
-    # Add index as id if not present
-    if 'id' not in data.columns:
-        data['id'] = data.index
-    return data
 
-def load_mmbench_dataset(data_path):
-    """Load MMBench dataset from TSV file"""
-    if not os.path.exists(data_path):
-        raise FileNotFoundError(f"Dataset file {data_path} not found.")
-    
-    # MMBench TSV usually has 'index' as the first column
-    df = pd.read_csv(data_path, sep='\t')
+    df = pd.concat(dfs, ignore_index=True)
+    if 'index' not in df.columns:
+        if 'id' in df.columns:
+            df['index'] = df['id']
+        else:
+            df['index'] = df.index
+    if 'id' not in df.columns:
+        df['id'] = df['index']
+    df = _normalize_image_references(df)
     return df
 
-def load_mmstar_dataset(data_path):
-    """Load MMStar dataset from TSV file"""
-    if not os.path.exists(data_path):
-        raise FileNotFoundError(f"Dataset file {data_path} not found.")
-    
-    # MMBench TSV usually has 'index' as the first column
-    df = pd.read_csv(data_path, sep='\t')
-    return df
 
+def load_mmbench_dataset(data_path: str) -> pd.DataFrame:
+    """MMBench (including *_V11 variants): TSV/CSV loader."""
+    return _load_table_file(data_path)
+
+
+def load_hallusionbench_dataset(data_path: str) -> pd.DataFrame:
+    """HallusionBench TSV/CSV loader."""
+    return _load_table_file(data_path)
+
+
+def load_ai2d_dataset(data_path: str) -> pd.DataFrame:
+    """AI2D_TEST TSV/CSV loader."""
+    return _load_table_file(data_path)
+
+
+def load_mme_dataset(data_path: str) -> pd.DataFrame:
+    """MME TSV/CSV loader."""
+    return _load_table_file(data_path)
+
+
+def load_scienceqa_dataset(data_path: str) -> pd.DataFrame:
+    """ScienceQA_TEST TSV/CSV loader."""
+    return _load_table_file(data_path)
+
+
+def load_pope_dataset(data_path: str) -> pd.DataFrame:
+    """POPE TSV/CSV loader."""
+    return _load_table_file(data_path)
+
+
+def load_realworldqa_dataset(data_path: str) -> pd.DataFrame:
+    """RealWorldQA loader.
+
+    - Preferred: TSV/CSV file (e.g. /home/fanya/LMUData/RealWorldQA.tsv)
+    - Backward compatible: parquet directory
+    """
+    if os.path.isfile(data_path):
+        return _load_table_file(data_path)
+    if os.path.isdir(data_path):
+        return _load_parquet_dir(data_path)
+    raise FileNotFoundError(f"RealWorldQA path not found: {data_path}")
+
+
+# optional backward compatibility for existing experiments
+def load_mathvision_dataset(data_path: str) -> pd.DataFrame:
+    return _load_table_file(data_path)
