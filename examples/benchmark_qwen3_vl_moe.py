@@ -16,25 +16,21 @@ sys.path.insert(0, "/home/fanya/qwen3_vl_moe_test")
 from qwen_vl_utils import process_vision_info
 from utils.dataset import (
     load_mmbench_dataset,
-    load_mmstar_dataset,
-    load_realworldqa_dataset,
+    load_realworldqa_dataset
 )
 from utils.eval import eval_mmbench, eval_mmstar, eval_realworldqa
 from utils.prompt import (
     build_mmbench_prompt,
-    build_mmstar_prompt,
-    build_realworldqa_prompt,
+    build_realworldqa_prompt
 )
 
 DATASET_LOADERS = {
     "realworldqa": load_realworldqa_dataset,
-    "mmbench": load_mmbench_dataset,
-    "mmstar": load_mmstar_dataset,
+    "mmbench": load_mmbench_dataset
 }
 PROMPT_BUILDERS = {
     "realworldqa": build_realworldqa_prompt,
-    "mmbench": build_mmbench_prompt,
-    "mmstar": build_mmstar_prompt,
+    "mmbench": build_mmbench_prompt
 }
 EVAL_FNS = {
     "realworldqa": eval_realworldqa,
@@ -355,7 +351,7 @@ def main():
         default="/data1/fanya/models/Qwen/Qwen3-VL-30B-A3B-Instruct",
     )
     parser.add_argument(
-        "--data-dir", type=str, default="/data1/fanya/datasets/realworldqa/data"
+        "--data-dir", type=str, default="/home/fanya/LMUData/RealWorldQA.tsv"
     )
     parser.add_argument(
         "--output-dir", type=str, default="./results/moe_infinity_benchmark",
@@ -363,10 +359,7 @@ def main():
     parser.add_argument(
         "--offload-path",
         type=str,
-        default=os.path.join(
-            os.path.expanduser("~"),
-            "moe-infinity-qwen3vl",
-        ),
+        default="/home/fanya/qwen3_vl_moe_test/moe-infinity-qwen3vl",
     )
     parser.add_argument(
         "--device-memory-ratio",
