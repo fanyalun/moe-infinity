@@ -145,12 +145,15 @@ def run_benchmark(args):
     for i in range(min(5, len(dataset))):
         try:
             row = dataset.iloc[i]
+            print(f"[DEBUG] Warmup {i}: Building prompt...")
             msgs = build_prompt(row, img_root)
+            print(f"[DEBUG] Warmup {i}: msgs = {msgs}")
             text = processor.apply_chat_template(
                 msgs,
                 tokenize=False,
                 add_generation_prompt=True,
             )
+            print(f"[DEBUG] Warmup {i}: Processing vision info...")
             images, videos, video_kwargs = (
                 process_vision_info(
                     msgs,
@@ -159,11 +162,13 @@ def run_benchmark(args):
                     return_video_metadata=True,
                 )
             )
+            print(f"[DEBUG] Warmup {i}: images={images}, videos={videos}")
             video_metadatas = None
             if videos is not None:
                 videos, video_metadatas = zip(*videos)
                 videos = list(videos)
                 video_metadatas = list(video_metadatas)
+            print(f"[DEBUG] Warmup {i}: Calling processor...")
             inputs = processor(
                 text=[text],
                 images=images,
@@ -176,9 +181,13 @@ def run_benchmark(args):
                 return_tensors="pt",
                 **(video_kwargs or {}),
             ).to("cuda:0")
+            print(f"[DEBUG] Warmup {i}: Generating...")
             _ = moe.generate(**inputs, max_new_tokens=10)
+            print(f"[DEBUG] Warmup {i}: Success!")
         except Exception as e:
             print(f"Warmup sample {i} failed: {e}")
+            import traceback
+            traceback.print_exc()
     print("Warmup completed")
 
     # 4. Inference
