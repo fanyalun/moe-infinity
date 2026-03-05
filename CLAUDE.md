@@ -16,6 +16,11 @@ pip install -e .
 conda install -c conda-forge libstdcxx-ng=12
 ```
 
+### Enable FlashAttention (optional, for faster inference)
+```bash
+FLASH_ATTENTION_FORCE_BUILD=TRUE pip install flash-attn
+```
+
 ### Build with pre-compiled C++ ops
 ```bash
 BUILD_OPS=1 python -m build
@@ -32,6 +37,18 @@ Pre-commit runs: ruff (lint + format), clang-format (C++), codespell, and standa
 ### Run the OpenAI-compatible server
 ```bash
 python -m moe_infinity.entrypoints.openai.api_server --model <model> --offload-dir <dir>
+```
+
+### Run inference examples
+```bash
+# Basic interface example
+CUDA_VISIBLE_DEVICES=0 python examples/interface_example.py --model_name_or_path "deepseek-ai/DeepSeek-V2-Lite-Chat" --offload_dir <your local path on SSD>
+
+# README example
+python examples/readme_example.py
+
+# Qwen3 VL MoE example
+python examples/qwen3_vl_moe_example.py
 ```
 
 ### Tests
@@ -76,9 +93,13 @@ C++ queue tests use CMake in `tests/queues/`.
 5. `ExpertCache` manages GPU memory with activation-aware eviction
 
 ### Key configuration options (passed as dict to `MoE`)
-- `offload_path`: directory for expert weight storage
+- `offload_path`: directory for expert weight storage (MUST be unique per model)
 - `device_memory_ratio`: fraction of GPU memory to use for expert cache (0.0–1.0)
 - `trace_capacity`: size of the activation trace buffer
+
+### Important notes
+- The `offload_path` must be unique for each MoE model. Reusing the same path for different models will cause unexpected behavior.
+- Adjust `device_memory_ratio` if you encounter OOM errors (default: 0.75).
 
 ## Conventions
 
@@ -97,3 +118,4 @@ C++ queue tests use CMake in `tests/queues/`.
 - 保持代码简洁
 - 对话时称呼用户为“主人”
 - 修改完代码后，上传到GitHub
+- 我的机器上只有代码，没有环境，所有实验都在服务器上进行，通过git进行代码同步，所以本地并没有任何模型、数据、环境、cuda资源
