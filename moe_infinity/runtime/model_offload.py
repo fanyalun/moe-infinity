@@ -5,6 +5,7 @@
 
 import functools
 import gc
+import importlib
 import json
 import os
 import re
@@ -17,10 +18,18 @@ import transformers
 # from torch.distributed import rpc
 try:
     from auto_gptq.nn_modules.qlinear.qlinear_cuda import QuantLinear
-    from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as QuantLinearOld
+    from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import (
+        QuantLinear as QuantLinearOld,
+    )
 except ImportError:
-    class QuantLinear: pass
-    class QuantLinearOld: pass
+
+    class QuantLinear:
+        pass
+
+    class QuantLinearOld:
+        pass
+
+
 from safetensors import safe_open
 from tqdm import tqdm
 from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
@@ -31,13 +40,14 @@ from moe_infinity.distributed import DistributedExpertExecutor
 from moe_infinity.memory import ExpertPredictor, ExpertPrefetcher, ExpertTracer
 from moe_infinity.models import (
     DeepseekMoEBlock,
+    Qwen3MoEBlock,
     SyncArcticMoeBlock,
     SyncGrokMoeBlock,
     SyncMixtralSparseMoeBlock,
     SyncNllbMoeSparseMLP,
     SyncSwitchTransformersSparseMLP,
 )
-from moe_infinity.ops.op_builder.prefetch import PrefetchBuilder
+from moe_infinity.runtime.compile import script_expert
 from moe_infinity.runtime.hooks import *
 from moe_infinity.utils import (
     ArcherConfig,
@@ -50,12 +60,25 @@ from moe_infinity.utils.arguments import (
     copy_kwargs_to_device,
 )
 
-use_jit = False
-try:
-    import moe_infinity.ops.prefetch.prefetch_op as prefetch_op
-except ImportError:
-    print("Do not detect pre-installed ops, use JIT mode")
-    use_jit = True
+_prefetch_lib = None
+# Alias for compatibility
+prefetch_op = None
+
+
+def _load_prefetch_lib():
+    global _prefetch_lib, prefetch_op
+    if _prefetch_lib is None:
+        try:
+            prefetch_lib = importlib.import_module("moe_infinity._store")
+        except ImportError as exc:
+            raise ImportError(
+                "moe_infinity._store extension is required. Install with CUDA enabled."
+            ) from exc
+
+        _prefetch_lib = prefetch_lib
+        prefetch_op = prefetch_lib
+
+    return _prefetch_lib
 
 
 # class ArcherException(Exception):
@@ -139,7 +162,14 @@ class OffloadEngine(object):
         #              world_size=world_size)
         # print("Distributed init done")
 
-        self.prefetch_lib = PrefetchBuilder().load() if use_jit else prefetch_op
+        self.prefetch_lib = _load_prefetch_lib()
+
+        # new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
+        #     self.prefetch_lib.__file__, "TorchAllocateDevice", "TorchFreeDevice"
+        # )
+        # # Swap the current allocator
+        # torch.cuda.memory.change_current_allocator(new_alloc)
+
         self.archer_engine = self.prefetch_lib.prefetch_handle(
             self.checkpoint, _archer_config.device_memory_ratio
         )
@@ -297,6 +327,9 @@ class OffloadEngine(object):
             SyncMixtralSparseMoeBlock
         )
 
+        transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock
+        transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = Qwen3MoEBlock
+
         moe_infinity.models.modeling_grok.modeling_grok1._old_sparse_mlp = (
             moe_infinity.models.modeling_grok.MoeBlock
         )
@@ -311,13 +344,13 @@ class OffloadEngine(object):
             SyncArcticMoeBlock
         )
 
-        moe_infinity.models.modeling_deepseek._old_sparse_mlp = (
-            moe_infinity.models.modeling_deepseek.DeepseekV2MoE
+        moe_infinity.models.modeling_deepseek_v2._old_sparse_mlp = (
+            moe_infinity.models.modeling_deepseek_v2.DeepseekV2MoE
         )
         moe_infinity.models.modeling_deepseek_v3._old_sparse_mlp = (
             moe_infinity.models.modeling_deepseek_v3.DeepseekV3MoE
         )
-        moe_infinity.models.modeling_deepseek.modeling_deepseek.DeepseekV2MoE = DeepseekMoEBlock
+        moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.DeepseekV2MoE = DeepseekMoEBlock
         moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.DeepseekV3MoE = DeepseekMoEBlock
 
         def from_pretrained_decorator(
@@ -332,6 +365,7 @@ class OffloadEngine(object):
                 )
 
                 self.model_name = model_name = args[0]
+
                 # if "arctic" in model_name:
                 #     self.config = ArcticConfig.from_pretrained(*args, **kwargs)
                 # else:
@@ -339,6 +373,15 @@ class OffloadEngine(object):
                 self.num_layers, self.num_experts, self.num_encoder_layers = (
                     parse_moe_param(self.config)
                 )
+
+                if "qwen" in model_name.lower():
+                    self.prefetch_lib.init_moe_layer(
+                        self.num_experts,
+                        self.config.num_experts_per_tok,
+                        1024,
+                        self.config.hidden_size,
+                        self.config.moe_intermediate_size,
+                    )
 
                 self.dtype = parse_expert_dtype(self.config)
                 self.dtype_cls = self.config.torch_dtype
@@ -377,7 +420,10 @@ class OffloadEngine(object):
                             try:
                                 state_dict[k] = v.to(self.dtype_cls).to("cpu")
                             except Exception as e:
-                                print(f"Error converting {k} (device={v.device}) to {self.dtype_cls} on CPU: {e}", flush=True)
+                                print(
+                                    f"Error converting {k} (device={v.device}) to {self.dtype_cls} on CPU: {e}",
+                                    flush=True,
+                                )
                                 raise
 
                         self._offload_state_dict(state_dict, empty_state_dict)
@@ -420,6 +466,12 @@ class OffloadEngine(object):
                         else "eager"
                     ),
                 )
+
+                # script_expert(
+                #     self.checkpoint,
+                #     self.config.model_type,
+                #     self.config,
+                # )
 
                 if self.config.model_type == "deepseek_v3":
                     model = model.to(torch.float8_e4m3fn)
@@ -566,6 +618,7 @@ class OffloadEngine(object):
                         or isinstance(module, SyncGrokMoeBlock)
                         or isinstance(module, SyncArcticMoeBlock)
                         or isinstance(module, DeepseekMoEBlock)
+                        or isinstance(module, Qwen3MoEBlock)
                     ):
                         # module.archer_prefetch = self.archer_prefetch
                         # module.archer_tracer = self.archer_tracer
@@ -578,6 +631,8 @@ class OffloadEngine(object):
                         module.expert_tracer = self.expert_tracer
                         module.expert_predictor = self.expert_predictor
                         module.expert_tensor_map = self.expert_tensor_map
+
+                        module.lib = self.prefetch_lib
 
                         self.expert_layer_modules.append(module)
 
@@ -849,7 +904,10 @@ class OffloadEngine(object):
                     # )
 
                     self.expert_dispatcher.register_expert(
-                        expert_layer_id, expert_idx, expert_tensors
+                        expert_layer_id,
+                        expert_idx,
+                        expert_tensors,
+                        os.path.join(self.checkpoint, f"expert.pt"),
                     )
                 expert_layer_id += 1
             else:
@@ -1011,5 +1069,5 @@ class OffloadEngine(object):
             moe_infinity.models.modeling_arctic._old_sparse_mlp
         )
 
-        moe_infinity.models.modeling_deepseek.modeling_deepseek.DeepseekV2MoE = moe_infinity.models.modeling_deepseek._old_sparse_mlp
+        moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.DeepseekV2MoE = moe_infinity.models.modeling_deepseek_v2._old_sparse_mlp
         moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.DeepseekV3MoE = moe_infinity.models.modeling_deepseek_v3._old_sparse_mlp
