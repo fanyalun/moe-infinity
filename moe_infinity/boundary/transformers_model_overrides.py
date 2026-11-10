@@ -29,6 +29,7 @@ from moe_store.wrappers import (
     SyncNllbMoeSparseMLP,
     SyncOlmoeMoEBlock,
     SyncQwen3_5MoeSparseMoeBlock,
+    SyncQwen3VLMoeTextSparseMoeBlock,
 )
 
 from moe_infinity.kernel.minimax_m3_sparse_attention import (
@@ -84,6 +85,10 @@ def install_transformers_model_overrides() -> None:
     qwen3.Qwen3MoeSparseMoeBlock = Qwen3MoEBlock
     qwen3._old_qwen3_attention = qwen3.Qwen3MoeAttention
     qwen3.Qwen3MoeAttention = Qwen3PagedAttention
+
+    qwen3_vl = _model_module("qwen3_vl_moe")
+    qwen3_vl._old_qwen3_vl_sparse_moe = qwen3_vl.Qwen3VLMoeTextSparseMoeBlock
+    qwen3_vl.Qwen3VLMoeTextSparseMoeBlock = SyncQwen3VLMoeTextSparseMoeBlock
 
     dbrx = _model_module("dbrx")
     dbrx._old_dbrx_ffn = dbrx.DbrxFFN
@@ -172,6 +177,12 @@ def install_transformers_model_overrides() -> None:
 
 
 def restore_context_transformers_model_overrides() -> None:
+    qwen3_vl = _model_module("qwen3_vl_moe")
+    if hasattr(qwen3_vl, "_old_qwen3_vl_sparse_moe"):
+        qwen3_vl.Qwen3VLMoeTextSparseMoeBlock = (
+            qwen3_vl._old_qwen3_vl_sparse_moe
+        )
+
     gpt_oss = _model_module("gpt_oss")
     gpt_oss.GptOssMLP = gpt_oss._old_gpt_oss_mlp
 

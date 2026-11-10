@@ -4,6 +4,13 @@ All notable changes to MoE-Infinity will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Experimental synchronous Qwen3-VL-MoE text/image inference with routed
+  expert offloading, resident vision/text backbone, packed-weight layout
+  normalization, and tiny-model reference tests. Native GPU and full-model
+  validation are tracked separately; see `docs/qwen3_vl_moe.md`.
+
 ### Fixed
 - Expert-cache simulator: `extract_access_sequence` / `vectorized_access_sequence` with `include_prefill=False` now drop every non-decode record (by SGLang `forward_mode`), not just `records[0]`. Merged multi-request streams (`convert_sglang_traces --merge`) previously leaked one prefill pass per request into the "decode" stream — 52% of the accesses of the published Qwen3-30B-A3B and Qwen3-235B real-trace sweeps — which inflated LRU and Belady at small capacities (e.g. Qwen3-30B-A3B at 256 entries: LRU 0.4565 -> 0.0000, Belady 0.7028 -> 0.5013 on the decode-only stream). Records without `forward_mode` keep the old behaviour. Corrected tables: `benchmarks/cache_simulator/research/decode_policy_study.md`.
 

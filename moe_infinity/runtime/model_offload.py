@@ -56,6 +56,7 @@ from moe_store.wrappers import (
     SyncNllbMoeSparseMLP,
     SyncOlmoeMoEBlock,
     SyncQwen3_5MoeSparseMoeBlock,
+    SyncQwen3VLMoeTextSparseMoeBlock,
 )
 from safetensors import safe_open
 from tqdm import tqdm
@@ -66,6 +67,7 @@ from transformers import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
 from moe_infinity.boundary import ArcherEngineHooks
+from moe_infinity.boundary.qwen3_vl_moe import normalize_expert_tensor
 from moe_infinity.boundary.transformers_model_overrides import (
     install_transformers_model_overrides,
     restore_context_transformers_model_overrides,
@@ -389,6 +391,7 @@ def _remap_v5_batched_experts(
     if "gpt_oss" in arch or "gptoss" in arch:
         return
 
+    is_qwen3_vl = "qwen3vlmoe" in arch or "qwen3_vl_moe" in arch
     is_mixtral = "mixtral" in arch
     if is_mixtral:
         gate_name, up_name, down_name = "w1", "w3", "w2"
@@ -413,7 +416,9 @@ def _remap_v5_batched_experts(
         k for k in list(state_dict) if k.endswith("experts.gate_up_proj")
     ]:
         gate_up = state_dict[gate_up_key]
-        if gate_up.dim() != 3:
+        if is_qwen3_vl:
+            gate_up = normalize_expert_tensor(gate_up, config, "gate_up_proj")
+        elif gate_up.dim() != 3:
             continue
         out_block = _out_block(gate_up_key[: -len(".gate_up_proj")])
         for expert_idx in range(gate_up.shape[0]):
@@ -427,7 +432,9 @@ def _remap_v5_batched_experts(
         k for k in list(state_dict) if k.endswith("experts.down_proj")
     ]:
         down = state_dict[down_key]
-        if down.dim() != 3:
+        if is_qwen3_vl:
+            down = normalize_expert_tensor(down, config, "down_proj")
+        elif down.dim() != 3:
             continue
         out_block = _out_block(down_key[: -len(".down_proj")])
         for expert_idx in range(down.shape[0]):
@@ -1297,7 +1304,8 @@ class OffloadEngine(object):
 
                 if (
                     "qwen" in model_name.lower()
-                    and self.config.model_type != "qwen3_5_moe"
+                    and self.config.model_type
+                    not in ("qwen3_5_moe", "qwen3_vl_moe")
                 ):
                     self.prefetch_lib.init_moe_layer(
                         self.num_experts,
@@ -1307,8 +1315,13 @@ class OffloadEngine(object):
                         self.config.moe_intermediate_size,
                     )
 
-                self.dtype = parse_expert_dtype(self.config)
-                self.dtype_cls = resolve_config_dtype(self.config)
+                dtype_config = (
+                    moe_text_config(self.config)
+                    if self.config.model_type == "qwen3_vl_moe"
+                    else self.config
+                )
+                self.dtype = parse_expert_dtype(dtype_config)
+                self.dtype_cls = resolve_config_dtype(dtype_config)
                 if self.dtype_cls is None:
                     self.dtype_cls = torch.bfloat16
 
@@ -1710,7 +1723,7 @@ class OffloadEngine(object):
                     and self._attention_backend is not None
                 ):
                     pass  # No-op: attention replacement not yet implemented
-                for module in model.modules():
+                for module_name, module in model.named_modules():
                     if (
                         isinstance(module, SyncNllbMoeSparseMLP)
                         or isinstance(module, SyncMixtralSparseMoeBlock)
@@ -1720,6 +1733,7 @@ class OffloadEngine(object):
                         or isinstance(module, SyncDbrxFFNBlock)
                         or isinstance(module, SyncGptOssMLP)
                         or isinstance(module, SyncQwen3_5MoeSparseMoeBlock)
+                        or isinstance(module, SyncQwen3VLMoeTextSparseMoeBlock)
                         or isinstance(module, SyncOlmoeMoEBlock)
                         or isinstance(module, SyncJambaMoEBlock)
                         or isinstance(module, SyncGlmMoeDsaMoEBlock)
@@ -1748,13 +1762,26 @@ class OffloadEngine(object):
                         module.lib = self.prefetch_lib
 
                         self.expert_layer_modules.append(module)
-                        module.layer_id = module_idx + first_k_dense_replace
+                        if isinstance(
+                            module, SyncQwen3VLMoeTextSparseMoeBlock
+                        ):
+                            module.layer_id, _ = parse_expert_id(
+                                f"{module_name}.experts.0.gate_proj.weight",
+                                self.config,
+                            )
+                            if module.layer_id is None:
+                                raise ValueError(
+                                    f"Cannot resolve Qwen3-VL MoE layer {module_name!r}"
+                                )
+                        else:
+                            module.layer_id = module_idx + first_k_dense_replace
 
                         module_idx += 1
 
                 if getattr(self.config, "model_type", "") in (
                     "glm_moe_dsa",
                     "qwen3_5_moe",
+                    "qwen3_vl_moe",
                     "glm5_next",
                     "minimax_m3_vl",
                     "hy_v3",
@@ -1772,7 +1799,13 @@ class OffloadEngine(object):
                 # and are excluded via name_id_map membership).
                 if (
                     getattr(self.config, "model_type", "")
-                    in ("glm5_next", "minimax_m3_vl", "qwen3_5_moe", "hy_v3")
+                    in (
+                        "glm5_next",
+                        "minimax_m3_vl",
+                        "qwen3_5_moe",
+                        "qwen3_vl_moe",
+                        "hy_v3",
+                    )
                     and torch.cuda.is_available()
                 ):
                     _resident_device = torch.device("cuda", 0)
@@ -1891,6 +1924,10 @@ class OffloadEngine(object):
         # substring "shared_expert" matches all of them and no routed-expert key.
         if "shared_expert" in name:
             return True
+        if getattr(self.config, "model_type", "") == "qwen3_vl_moe":
+            # Vision interpolation and DeepStack access weights outside hooks.
+            _, expert_id = parse_expert_id(name, self.config)
+            return expert_id is None
         # Qwen3.5-MoE: keep the small text backbone (embed, hybrid attention,
         # norms, lm_head) resident and offload ONLY the routed experts. This
         # avoids the per-module begin/end offload path for the VLM embedding and

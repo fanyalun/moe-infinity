@@ -245,10 +245,12 @@ class MoE:
         # it stays on HF's eager path as well.
         # hy_v3 (Hy3-FP8) starts on the HF eager path like GLM-5.2; a
         # PagedAttention shim is a follow-up.
+        # Qwen3-VL keeps HF's multimodal positions, DeepStack, and KV lifecycle.
         if getattr(model_config, "model_type", "") in (
             "glm_moe_dsa",
             "glm5_next",
             "minimax_m3_vl",
+            "qwen3_vl_moe",
             "hy_v3",
         ):
             self.use_native_engine = False
@@ -1238,6 +1240,7 @@ class MoE:
             and native_engine is not None
             and input_ids.ndim == 2
             and input_ids.shape[0] == 1
+            and model_type != "qwen3_vl_moe"
             and (not is_qwen35 or qwen35_dflash)
         )
 

@@ -57,6 +57,7 @@ MoE-Infinity supports HuggingFace MoE checkpoints registered in [`moe_infinity/c
 | [Mixtral](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) | `mistralai/Mixtral-8x7B-Instruct-v0.1`, `Mixtral-8x22B` |
 | [Qwen3-MoE](https://huggingface.co/Qwen/Qwen3-30B-A3B) | `Qwen/Qwen3-30B-A3B` |
 | [Qwen3.5-MoE](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) | `Qwen/Qwen3.5-35B-A3B` |
+| [Qwen3-VL-MoE](docs/qwen3_vl_moe.md) | `Qwen/Qwen3-VL-30B-A3B-Instruct` (experimental synchronous text/image path) |
 | [GLM-5.2 / GLM-5.3](https://huggingface.co/zai-org/GLM-5.3) | `zai-org/GLM-5.2-FP8`, `zai-org/GLM-5.3` |
 | [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) | `zai-org/GLM-5.3-Flash` |
 | [Hy3 / Hy3-FP8](https://huggingface.co/tencent/Hy3-FP8) | `tencent/Hy3-FP8`, `tencent/Hy3` |
