@@ -3,7 +3,7 @@
 
 // Generic expert FFN (the implementation before #307 / #308): 3 CUTLASS GEMMs
 // with fixed 64x64 tiles, fusing act(gate, up) into the epilogue of the
-// up-projection GEMM (SiLU, clamped SiLU, or SwiGLU-OAI; see
+// up-projection GEMM (SiLU, clamped SiLU, SwiGLU-OAI, or GELU-tanh; see
 // kernel/moe_activation.h). fused_moe_ffn_into runs it on every GPU other than
 // the RTX PRO 6000, and for every non-SiLU activation on that GPU too
 // (see fused_moe_mlp.cu and docs/hardware-gated-kernels.md).
@@ -151,6 +151,10 @@ void dispatch_up_fused(int M, int I, int H, ElementInput* input_ptr,
       return;
     case MoEActivationKind::kSwiGLUOAI:
       run_up_fused<Gemm<MoEActivationKind::kSwiGLUOAI>>(
+          M, I, H, input_ptr, up_ptr, gate_buf_ptr, fused_ptr, act, stream);
+      return;
+    case MoEActivationKind::kGELUTanh:
+      run_up_fused<Gemm<MoEActivationKind::kGELUTanh>>(
           M, I, H, input_ptr, up_ptr, gate_buf_ptr, fused_ptr, act, stream);
       return;
   }

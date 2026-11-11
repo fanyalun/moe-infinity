@@ -6,6 +6,12 @@ All notable changes to MoE-Infinity will be documented in this file.
 
 ### Added
 
+- Gemma4 BF16 synchronous text/image expert offloading, including packed
+  expert loading, native GELU-tanh activation, resident non-expert weights,
+  and HF generation/KV ownership. Tiny native tests and two full 26B-A4B-it
+  greedy requests passed on A100; the latter exactly matched HF tokens.
+  Includes the matching moe-store source patch. See `docs/gemma4.md` for
+  validation scope and dependency setup.
 - Experimental synchronous Qwen3-VL-MoE text/image inference with routed
   expert offloading, resident vision/text backbone, packed-weight layout
   normalization, and tiny-model reference tests. Native GPU and full-model

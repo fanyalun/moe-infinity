@@ -11,6 +11,7 @@ the up-projection epilogue. Most gate/up/down families use plain
 
 * ``clamped_silu``: ``silu(min(gate, limit)) * clamp(up, -limit, limit)``
   (``swiglu_limit`` in GLM-5.3-Flash and DeepSeek-V4 / V4.1 configs).
+* ``gelu_pytorch_tanh``: ``gelu(gate, approximate='tanh') * up`` (Gemma4).
 * ``swiglu_oai``: ``(clamp(up, -limit, limit) + 1) * g * sigmoid(alpha * g)``
   with ``g = min(gate, limit)`` (MiniMax-M3, same gate as GPT-OSS).
 
@@ -29,11 +30,13 @@ import torch.nn.functional as F
 SILU = 0
 CLAMPED_SILU = 1
 SWIGLU_OAI = 2
+GELU_TANH = 3
 
 KIND_NAMES = {
     SILU: "silu",
     CLAMPED_SILU: "clamped_silu",
     SWIGLU_OAI: "swiglu_oai",
+    GELU_TANH: "gelu_pytorch_tanh",
 }
 
 # Expert types whose routed experts run the gate/up/down CUTLASS path.
@@ -89,10 +92,19 @@ def _get(config, text, name):
     return value
 
 
+def _hidden_activation(config, text):
+    for source in (text, config):
+        for name in ("hidden_activation", "hidden_act"):
+            value = getattr(source, name, None)
+            if value is not None:
+                return value
+    return None
+
+
 def resolve_expert_activation(config, expert_type: int) -> ExpertActivation:
     """Activation descriptor of ``config``'s routed experts.
 
-    Warns for a gate/up/down family whose ``hidden_act`` the native expert
+    Warns for a gate/up/down family whose configured activation the native
     kernel cannot express (it runs the SiLU variant).
     """
     if expert_type not in _GATED_EXPERT_TYPES:
@@ -112,12 +124,18 @@ def resolve_expert_activation(config, expert_type: int) -> ExpertActivation:
             limit = 7.0
         return ExpertActivation(SWIGLU_OAI, alpha, limit)
 
-    hidden_act = _get(config, text, "hidden_act")
+    hidden_act = _hidden_activation(config, text)
+    if (
+        hidden_act is not None
+        and str(hidden_act).lower() == "gelu_pytorch_tanh"
+    ):
+        return ExpertActivation(GELU_TANH)
     if hidden_act is not None and str(hidden_act).lower() not in _SILU_ACTS:
         warnings.warn(
-            f"native expert path supports SiLU-gated experts only; "
+            f"native expert path supports SiLU-gated or gelu_pytorch_tanh "
+            f"experts only; "
             f"{sorted(t for t in model_types if t)} declares "
-            f"hidden_act={hidden_act!r}",
+            f"activation={hidden_act!r}",
             stacklevel=2,
         )
     if limit > 0.0:
@@ -145,6 +163,10 @@ def reference_gated_act(
     """Eager reference of the epilogue math (HF formulation)."""
     if activation.kind == SILU:
         return F.silu(gate) * up
+    if activation.kind == GELU_TANH:
+        return F.gelu(gate, approximate="tanh") * up
+    if activation.kind not in (CLAMPED_SILU, SWIGLU_OAI):
+        raise ValueError(f"unknown MoE activation kind {activation.kind}")
     gate = gate.clamp(max=activation.limit)
     up = up.clamp(min=-activation.limit, max=activation.limit)
     if activation.kind == CLAMPED_SILU:

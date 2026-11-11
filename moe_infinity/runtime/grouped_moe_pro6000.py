@@ -8,14 +8,20 @@ this mirrors it for Python-side setup and tests.
 
 The kernels implement ``silu(gate) * up`` only. ``grouped_decode_activation_kind``
 classifies a config the same way as #330's ``resolve_expert_activation``
-(MoEActivationKind: 0 SiLU, 1 clamped SiLU, 2 SwiGLU-OAI, -1 unknown) so the
-dispatcher keeps per-expert execution for every other activation.
+(MoEActivationKind: 0 SiLU, 1 clamped SiLU, 2 SwiGLU-OAI, 3 GELU-tanh,
+-1 unknown) so the dispatcher keeps per-expert execution for every other
+activation.
 """
 
 from __future__ import annotations
 
 import os
 
+from moe_infinity.runtime.expert_activation import (
+    GELU_TANH,
+    _hidden_activation,
+    _text_config,
+)
 from moe_infinity.utils.hw_profile import RTX_PRO_6000, supports
 
 
@@ -35,19 +41,6 @@ _SWIGLU_OAI_MODEL_TYPES = frozenset({"minimax_m3_vl", "minimax_m3_vl_text"})
 _SILU_ACTS = frozenset({"silu", "swish"})
 
 
-def _text_config(config):
-    for name in ("thinker_config", "text_config"):
-        sub = getattr(config, name, None)
-        if sub is not None and not isinstance(sub, dict):
-            inner = getattr(sub, "text_config", None)
-            return (
-                inner
-                if inner is not None and not isinstance(inner, dict)
-                else sub
-            )
-    return config
-
-
 def _get(config, text, name):
     value = getattr(text, name, None)
     return getattr(config, name, None) if value is None else value
@@ -62,10 +55,15 @@ def grouped_decode_activation_kind(config) -> int:
     }
     if model_types & _SWIGLU_OAI_MODEL_TYPES:
         return SWIGLU_OAI
+    hidden_act = _hidden_activation(config, text)
+    if (
+        hidden_act is not None
+        and str(hidden_act).lower() == "gelu_pytorch_tanh"
+    ):
+        return GELU_TANH
     limit = _get(config, text, "swiglu_limit")
     if limit is not None and float(limit) > 0.0:
         return CLAMPED_SILU
-    hidden_act = _get(config, text, "hidden_act")
     if hidden_act is not None and str(hidden_act).lower() not in _SILU_ACTS:
         return UNKNOWN
     return SILU

@@ -20,6 +20,7 @@ from moe_store.wrappers import (
     SyncDbrxFFNBlock,
     SyncDeepseekV2MoEBlock,
     SyncDeepseekV3MoEBlock,
+    SyncGemma4TextExperts,
     SyncGlm5NextMoEBlock,
     SyncGlmMoeDsaMoEBlock,
     SyncGptOssMLP,
@@ -68,6 +69,13 @@ def _model_module(name: str):
     )
 
 
+def _gemma4_module():
+    try:
+        return _model_module("gemma4")
+    except ImportError:
+        return None
+
+
 def install_transformers_model_overrides() -> None:
     nllb = _model_module("nllb_moe")
     nllb._old_sparse_mlp = nllb.NllbMoeSparseMLP
@@ -89,6 +97,21 @@ def install_transformers_model_overrides() -> None:
     qwen3_vl = _model_module("qwen3_vl_moe")
     qwen3_vl._old_qwen3_vl_sparse_moe = qwen3_vl.Qwen3VLMoeTextSparseMoeBlock
     qwen3_vl.Qwen3VLMoeTextSparseMoeBlock = SyncQwen3VLMoeTextSparseMoeBlock
+
+    gemma4 = _gemma4_module()
+    if gemma4 is not None:
+        gemma4._old_gemma4_experts = gemma4.Gemma4TextExperts
+        gemma4._old_gemma4_init_weights = (
+            gemma4.Gemma4PreTrainedModel._init_weights
+        )
+        gemma4.Gemma4TextExperts = SyncGemma4TextExperts
+
+        def init_gemma4_weights(model, module):
+            # The replacement owns Linear children rather than packed parameters.
+            if not isinstance(module, SyncGemma4TextExperts):
+                gemma4._old_gemma4_init_weights(model, module)
+
+        gemma4.Gemma4PreTrainedModel._init_weights = init_gemma4_weights
 
     dbrx = _model_module("dbrx")
     dbrx._old_dbrx_ffn = dbrx.DbrxFFN
@@ -177,6 +200,13 @@ def install_transformers_model_overrides() -> None:
 
 
 def restore_context_transformers_model_overrides() -> None:
+    gemma4 = _gemma4_module()
+    if gemma4 is not None and hasattr(gemma4, "_old_gemma4_experts"):
+        gemma4.Gemma4TextExperts = gemma4._old_gemma4_experts
+        gemma4.Gemma4PreTrainedModel._init_weights = (
+            gemma4._old_gemma4_init_weights
+        )
+
     qwen3_vl = _model_module("qwen3_vl_moe")
     if hasattr(qwen3_vl, "_old_qwen3_vl_sparse_moe"):
         qwen3_vl.Qwen3VLMoeTextSparseMoeBlock = (
@@ -232,6 +262,13 @@ def restore_context_transformers_model_overrides() -> None:
 
 
 def restore_runtime_transformers_model_overrides() -> None:
+    gemma4 = _gemma4_module()
+    if gemma4 is not None and hasattr(gemma4, "_old_gemma4_experts"):
+        gemma4.Gemma4TextExperts = gemma4._old_gemma4_experts
+        gemma4.Gemma4PreTrainedModel._init_weights = (
+            gemma4._old_gemma4_init_weights
+        )
+
     nllb = _model_module("nllb_moe")
     nllb.NllbMoeSparseMLP = nllb._old_sparse_mlp
 

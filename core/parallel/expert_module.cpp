@@ -419,6 +419,7 @@ bool MoEMLP::TryBindFp8Sm120Pro6000(
   }();
   fp8_sm120_pro6000_ = false;
   if (!kNativeEnabled || !fp8_sm120_pro6000_allowed_) return false;
+  if (activation_.kind != MoEActivationKind::kSiLU) return false;
   if (expert_type_ != DEEPSEEK_MOE_DENSE_ACT_DENSE &&
       expert_type_ != MIXTRAL_MOE_DENSE_ACT_DENSE) {
     return false;

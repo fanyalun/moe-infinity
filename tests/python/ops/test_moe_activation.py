@@ -7,6 +7,7 @@ import torch
 
 from moe_infinity.runtime.expert_activation import (
     CLAMPED_SILU,
+    GELU_TANH,
     SILU,
     SWIGLU_OAI,
     ExpertActivation,
@@ -27,6 +28,7 @@ def _store():
 
 ACTS = {
     "silu": ExpertActivation(),
+    "gemma4_gelu_tanh": ExpertActivation(GELU_TANH),
     "glm5_next_clamped_silu": ExpertActivation(CLAMPED_SILU, 1.0, 10.0),
     "minimax_m3_swiglu_oai": ExpertActivation(SWIGLU_OAI, 1.702, 7.0),
 }
@@ -54,7 +56,11 @@ def _reference(x, g, u, d, act):
     # HF eager order: bf16 projections, activation, bf16 down projection.
     gate = x @ g.t()
     up = x @ u.t()
-    fused = reference_gated_act(gate.float(), up.float(), act).to(x.dtype)
+    fused = (
+        reference_gated_act(gate, up, act)
+        if act.kind == GELU_TANH
+        else reference_gated_act(gate.float(), up.float(), act).to(x.dtype)
+    )
     return fused @ d.t(), fused
 
 
@@ -93,7 +99,7 @@ def test_fused_moe_ffn_activation_matches_reference(
     assert _rel(fused, ref_fused) < 2e-2
     assert _rel(out, ref_out) < 2e-2
 
-    if act.kind != SILU:
+    if act.kind not in (SILU, GELU_TANH):
         # The clamp is active at these magnitudes: plain SiLU must be far off.
         assert _rel(out, _reference(x, g, u, d, ACTS["silu"])[0]) > 0.2
 
@@ -120,3 +126,16 @@ def test_fused_moe_ffn_rejects_invalid_descriptor(kind, alpha, limit):
     x, g, u, d = _weights(4, 256, 512, gate_up_std=1.0)
     with pytest.raises(RuntimeError):
         _run(store, x, g, u, d, ExpertActivation(kind, alpha, limit))
+
+
+@requires_cuda
+def test_gemma4_gelu_tanh_rejects_silu_math(seed_everything):
+    store = _store()
+    x, g, u, d = _weights(16, 256, 512, gate_up_std=1.0)
+    act = ExpertActivation(GELU_TANH)
+    out, fused = _run(store, x, g, u, d, act)
+    ref_out, ref_fused = _reference(x, g, u, d, act)
+    torch.cuda.synchronize()
+    assert _rel(fused, ref_fused) < 2e-2
+    assert _rel(out, ref_out) < 2e-2
+    assert _rel(out, _reference(x, g, u, d, ACTS["silu"])[0]) > 0.05

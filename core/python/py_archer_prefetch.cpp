@@ -226,7 +226,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
          int activation, float alpha, float limit) {
         TORCH_CHECK(
             activation >= static_cast<int>(MoEActivationKind::kSiLU) &&
-                activation <= static_cast<int>(MoEActivationKind::kSwiGLUOAI),
+                activation <= static_cast<int>(MoEActivationKind::kGELUTanh),
             "fused_moe_ffn_into: unknown activation kind ", activation);
         cudaStream_t cuda_stream =
             stream.is_none()

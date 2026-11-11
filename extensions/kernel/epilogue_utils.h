@@ -110,9 +110,17 @@ struct GatedActEpilogue {
 
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < kCount; ++i) {
-      result[i] = to_output(
-          moe_gated_act<Kind>(to_float_s(source[i]), to_float_a(accum[i]),
-                              params_.act_alpha, params_.act_limit));
+      if constexpr (Kind == MoEActivationKind::kGELUTanh) {
+        // HF Gemma4 rounds both projections and GELU before the product.
+        const float up = to_float_s(to_output(to_float_a(accum[i])));
+        const float gate = to_float_s(source[i]);
+        const float activated = to_float_s(to_output(moe_gelu_tanh(gate)));
+        result[i] = to_output(activated * up);
+      } else {
+        result[i] = to_output(
+            moe_gated_act<Kind>(to_float_s(source[i]), to_float_a(accum[i]),
+                                params_.act_alpha, params_.act_limit));
+      }
     }
 
     return result;

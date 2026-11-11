@@ -47,6 +47,7 @@ from moe_store.wrappers import (
     SyncDbrxFFNBlock,
     SyncDeepseekV2MoEBlock,
     SyncDeepseekV3MoEBlock,
+    SyncGemma4TextExperts,
     SyncGlm5NextMoEBlock,
     SyncGlmMoeDsaMoEBlock,
     SyncGptOssMLP,
@@ -67,6 +68,9 @@ from transformers import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
 from moe_infinity.boundary import ArcherEngineHooks
+from moe_infinity.boundary.gemma4 import (
+    normalize_expert_tensor as normalize_gemma4_expert_tensor,
+)
 from moe_infinity.boundary.qwen3_vl_moe import normalize_expert_tensor
 from moe_infinity.boundary.transformers_model_overrides import (
     install_transformers_model_overrides,
@@ -392,6 +396,7 @@ def _remap_v5_batched_experts(
         return
 
     is_qwen3_vl = "qwen3vlmoe" in arch or "qwen3_vl_moe" in arch
+    is_gemma4 = "gemma4" in arch
     is_mixtral = "mixtral" in arch
     if is_mixtral:
         gate_name, up_name, down_name = "w1", "w3", "w2"
@@ -418,6 +423,10 @@ def _remap_v5_batched_experts(
         gate_up = state_dict[gate_up_key]
         if is_qwen3_vl:
             gate_up = normalize_expert_tensor(gate_up, config, "gate_up_proj")
+        elif is_gemma4:
+            gate_up = normalize_gemma4_expert_tensor(
+                gate_up, config, "gate_up_proj"
+            )
         elif gate_up.dim() != 3:
             continue
         out_block = _out_block(gate_up_key[: -len(".gate_up_proj")])
@@ -434,6 +443,8 @@ def _remap_v5_batched_experts(
         down = state_dict[down_key]
         if is_qwen3_vl:
             down = normalize_expert_tensor(down, config, "down_proj")
+        elif is_gemma4:
+            down = normalize_gemma4_expert_tensor(down, config, "down_proj")
         elif down.dim() != 3:
             continue
         out_block = _out_block(down_key[: -len(".down_proj")])
@@ -668,9 +679,13 @@ def _split_fp8_pertensor_state_dict(state_dict, scales_out) -> None:
 
 
 _ROUTED_EXPERT_RE = re.compile(r"\.mlp\.experts\.\d+\.")
+_GEMMA4_ROUTED_EXPERT_RE = re.compile(
+    r"^model\.language_model\.layers\.\d+\.experts\.\d+\."
+)
 
 
 def _is_routed_expert_key(key: str) -> bool:
+    # Gemma4 attaches experts to the decoder layer rather than its shared MLP.
     # Routed experts (including the MTP layer's, which parse_expert_id drops via
     # its layer_id >= num_layers guard) are dequantized on-device by the
     # dispatcher, so they stay FP8 in the store. Matches ".mlp.experts.<id>."
@@ -678,7 +693,10 @@ def _is_routed_expert_key(key: str) -> bool:
     # NOTE(#142): Mixtral names routed experts ".block_sparse_moe.experts.<id>."
     # (see _remap_v5_batched_experts), which this regex does NOT match, so its
     # routed experts are currently misclassified as non-routed. Tracked in #142.
-    return _ROUTED_EXPERT_RE.search(key) is not None
+    return (
+        _ROUTED_EXPERT_RE.search(key) is not None
+        or _GEMMA4_ROUTED_EXPERT_RE.search(key) is not None
+    )
 
 
 def _has_fp8_blockwise(config: object) -> bool:
@@ -709,7 +727,12 @@ def _expert_routing_prior(config: object, num_experts: int) -> Optional[float]:
     for source in sources:
         if source is None:
             continue
-        for name in ("num_experts_per_tok", "moe_top_k", "experts_per_token"):
+        for name in (
+            "num_experts_per_tok",
+            "top_k_experts",
+            "moe_top_k",
+            "experts_per_token",
+        ):
             value = (
                 source.get(name)
                 if isinstance(source, dict)
@@ -1303,7 +1326,7 @@ class OffloadEngine(object):
                 )
 
                 if (
-                    "qwen" in model_name.lower()
+                    "qwen" in self.config.model_type
                     and self.config.model_type
                     not in ("qwen3_5_moe", "qwen3_vl_moe")
                 ):
@@ -1317,7 +1340,7 @@ class OffloadEngine(object):
 
                 dtype_config = (
                     moe_text_config(self.config)
-                    if self.config.model_type == "qwen3_vl_moe"
+                    if self.config.model_type in ("qwen3_vl_moe", "gemma4")
                     else self.config
                 )
                 self.dtype = parse_expert_dtype(dtype_config)
@@ -1542,6 +1565,10 @@ class OffloadEngine(object):
 
                 self.model = model
 
+                if self.config.model_type == "gemma4":
+                    # Empty initialization skips HF's post_init weight tying.
+                    model.tie_weights()
+
                 base_model_prefix = model.base_model_prefix
 
                 model = self._apply_quantized_model_conversion(model)
@@ -1571,8 +1598,11 @@ class OffloadEngine(object):
                     )
 
                     # RTX PRO 6000 only; top-k sizes the kernel's workspace.
+                    text_config = moe_text_config(self.config)
                     top_k = getattr(
-                        moe_text_config(self.config), "num_experts_per_tok", 0
+                        text_config,
+                        "num_experts_per_tok",
+                        getattr(text_config, "top_k_experts", 0),
                     )
                     self.expert_dispatcher.set_grouped_decode(
                         grouped_decode_pro6000_enabled(),
@@ -1607,7 +1637,10 @@ class OffloadEngine(object):
                 # this architecture actually has -- encoder/decoder for
                 # encoder-decoder models (NLLB-MoE), a single embed_tokens
                 # for decoder-only ones (Mixtral, Qwen3-MoE, etc.).
-                if "lm_head.weight" not in self.name_id_map:
+                if (
+                    "lm_head.weight" not in self.name_id_map
+                    and self.config.model_type != "gemma4"
+                ):
                     print(
                         "lm_head.weight not in name_id_map, add it as embed_tokens"
                     )
@@ -1734,6 +1767,7 @@ class OffloadEngine(object):
                         or isinstance(module, SyncGptOssMLP)
                         or isinstance(module, SyncQwen3_5MoeSparseMoeBlock)
                         or isinstance(module, SyncQwen3VLMoeTextSparseMoeBlock)
+                        or isinstance(module, SyncGemma4TextExperts)
                         or isinstance(module, SyncOlmoeMoEBlock)
                         or isinstance(module, SyncJambaMoEBlock)
                         or isinstance(module, SyncGlmMoeDsaMoEBlock)
@@ -1762,7 +1796,16 @@ class OffloadEngine(object):
                         module.lib = self.prefetch_lib
 
                         self.expert_layer_modules.append(module)
-                        if isinstance(
+                        if isinstance(module, SyncGemma4TextExperts):
+                            module.layer_id, _ = parse_expert_id(
+                                f"{module_name}.0.gate_proj.weight",
+                                self.config,
+                            )
+                            if module.layer_id is None:
+                                raise ValueError(
+                                    f"Cannot resolve Gemma4 MoE layer {module_name!r}"
+                                )
+                        elif isinstance(
                             module, SyncQwen3VLMoeTextSparseMoeBlock
                         ):
                             module.layer_id, _ = parse_expert_id(
@@ -1782,6 +1825,7 @@ class OffloadEngine(object):
                     "glm_moe_dsa",
                     "qwen3_5_moe",
                     "qwen3_vl_moe",
+                    "gemma4",
                     "glm5_next",
                     "minimax_m3_vl",
                     "hy_v3",
@@ -1804,6 +1848,7 @@ class OffloadEngine(object):
                         "minimax_m3_vl",
                         "qwen3_5_moe",
                         "qwen3_vl_moe",
+                        "gemma4",
                         "hy_v3",
                     )
                     and torch.cuda.is_available()
@@ -1924,8 +1969,8 @@ class OffloadEngine(object):
         # substring "shared_expert" matches all of them and no routed-expert key.
         if "shared_expert" in name:
             return True
-        if getattr(self.config, "model_type", "") == "qwen3_vl_moe":
-            # Vision interpolation and DeepStack access weights outside hooks.
+        if getattr(self.config, "model_type", "") in ("qwen3_vl_moe", "gemma4"):
+            # Vision and shared branches read parameters outside offload hooks.
             _, expert_id = parse_expert_id(name, self.config)
             return expert_id is None
         # Qwen3.5-MoE: keep the small text backbone (embed, hybrid attention,
@@ -2072,6 +2117,16 @@ class OffloadEngine(object):
             for name, param in model.named_parameters(recurse=True)
             if self._is_shared_expert_param(name)
         }
+        if getattr(self.config, "model_type", "") == "gemma4":
+            # Layer scales and vision standardization are checkpoint buffers.
+            persistent = model.state_dict().keys()
+            wanted.update(
+                {
+                    name: buffer
+                    for name, buffer in model.named_buffers(recurse=True)
+                    if name in persistent and self._is_shared_expert_param(name)
+                }
+            )
         if not wanted:
             return
 
@@ -2523,6 +2578,16 @@ class OffloadEngine(object):
             if len(id_groups) != 1:
                 continue
             id_groups[0].sort()
+        if getattr(self.config, "model_type", "") == "gemma4":
+            layers, experts, _ = parse_moe_param(self.config)
+            if len(topology) != layers or any(
+                len(groups) != experts or any(len(ids) != 3 for ids in groups)
+                for _, groups in topology
+            ):
+                raise ValueError(
+                    "Gemma4 expert topology must contain every layer and "
+                    "expert, with gate/up/down tensor slots"
+                )
         return topology
 
     def setup_archer_hooks(self, model):

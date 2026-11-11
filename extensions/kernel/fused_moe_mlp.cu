@@ -624,6 +624,7 @@ void fused_moe_ffn_pro6000(torch::Tensor& hidden, torch::Tensor& gate_proj,
 void check_moe_activation(const MoEActivation& act) {
   switch (act.kind) {
     case MoEActivationKind::kSiLU:
+    case MoEActivationKind::kGELUTanh:
       return;
     case MoEActivationKind::kClampedSiLU:
       TORCH_CHECK(act.limit > 0.0f,

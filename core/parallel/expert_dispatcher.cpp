@@ -332,7 +332,7 @@ void ExpertDispatcher::SetScales(
 
 void ExpertDispatcher::SetExpertActivation(int kind, float alpha, float limit) {
   TORCH_CHECK(kind >= static_cast<int>(MoEActivationKind::kSiLU) &&
-                  kind <= static_cast<int>(MoEActivationKind::kSwiGLUOAI),
+                  kind <= static_cast<int>(MoEActivationKind::kGELUTanh),
               "SetExpertActivation: unknown activation kind ", kind);
   MoEActivation activation{static_cast<MoEActivationKind>(kind), alpha, limit};
   check_moe_activation(activation);

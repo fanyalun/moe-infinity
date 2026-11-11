@@ -60,8 +60,8 @@ bool fused_moe_ffn_pro6000_enabled(int device);
 
 // Previous implementation: 3 CUTLASS GEMMs with fixed 64x64 tiles, writes
 // gate_buf. Generic; the fallback of fused_moe_ffn_into. The overload with
-// MoEActivation selects the up-projection epilogue (SiLU, clamped SiLU, or
-// SwiGLU-OAI).
+// MoEActivation selects the up-projection epilogue (SiLU, clamped SiLU,
+// SwiGLU-OAI, or GELU-tanh).
 void fused_moe_ffn_into_generic(torch::Tensor& hidden, torch::Tensor& gate_proj,
                                 torch::Tensor& up_proj,
                                 torch::Tensor& down_proj,

@@ -1,0 +1,537 @@
+From c893a1ca28b878d8ba0be8bcfc5c33381902d8aa Mon Sep 17 00:00:00 2001
+From: yalunfan <yalunfan33@gmail.com>
+Date: Wed, 11 Nov 2026 02:51:55 +0000
+Subject: [PATCH] feat(gemma4): add bf16 expert store adapter
+
+Preserve packed expert dtype and HF routing scales, with native dispatch safe under inference mode.
+---
+ README.md                                |  14 ++-
+ moe_store/convert/v5_remap.py            |  24 ++++
+ moe_store/parsing/hf_config.py           |  19 ++++
+ moe_store/registry/constants.py          |   9 ++
+ moe_store/registry/slots.py              |   3 +-
+ moe_store/wrappers/__init__.py           |   2 +
+ moe_store/wrappers/gemma4.py             |  91 +++++++++++++++
+ tests/test_gemma4_registry.py            | 134 +++++++++++++++++++++++
+ tests/test_registry_conversion_matrix.py |  76 +++++++++++++
+ 9 files changed, 370 insertions(+), 2 deletions(-)
+ create mode 100644 moe_store/wrappers/gemma4.py
+ create mode 100644 tests/test_gemma4_registry.py
+
+diff --git a/README.md b/README.md
+index 02b1573..27c98b6 100644
+--- a/README.md
++++ b/README.md
+@@ -46,15 +46,27 @@ moe-store convert deepseek-ai/DeepSeek-V2-Lite-Chat /ssd/stores/dsv2-lite
+ moe-store inspect /ssd/stores/dsv2-lite
+ ```
+
+-Multimodal MoE checkpoints (Qwen3-VL-MoE, Qwen3-Omni-MoE) convert the same
++Multimodal MoE checkpoints (Qwen3-VL-MoE, Qwen3-Omni-MoE, Gemma4) convert the same
+ way; resident towers (vision, audio, Omni talker) land in dense groups while
+ the routed experts get one group per `(layer, expert)`:
+
+ ```bash
+ moe-store convert Qwen/Qwen3-VL-235B-A22B-Instruct /ssd/stores/qwen3-vl
+ moe-store convert Qwen/Qwen3-Omni-30B-A3B-Instruct /ssd/stores/qwen3-omni
++moe-store convert google/gemma-4-26B-A4B-it /ssd/stores/gemma4
+ ```
+
++The experimental Gemma4 adapter targets the unquantized BF16
++`google/gemma-4-26B-A4B-it` checkpoint. Conversion keeps its BF16 expert
++weights in gate/up/down slot order and leaves the router, dense MLP, and
++vision tower in dense groups. `SyncGemma4TextExperts` preserves the HF
++decoder's routing weights, including per-expert scales; it requires a
++MoE-Infinity runtime with the matching Gemma4 loader and GELU-tanh expert
++activation. The matching runtime passed tiny native GPU validation and two
++full 26B BF16 text/image greedy requests on A100, with output tokens matching
++the original HF model. This is a correctness smoke test; throughput and
++general accuracy were not measured.
++
+ Dense diffusion transformers (diffusers-style `_class_name` configs) are
+ stored as dense groups only. Single-component pipeline repos auto-descend
+ into `transformer/`; roots with two or more weight-bearing components
+diff --git a/moe_store/convert/v5_remap.py b/moe_store/convert/v5_remap.py
+index 4fed463..f3e7718 100644
+--- a/moe_store/convert/v5_remap.py
++++ b/moe_store/convert/v5_remap.py
+@@ -24,6 +24,7 @@ from typing import Callable
+ import torch
+
+ from moe_store.convert.planner import TensorSpec
++from moe_store.parsing.hf_config import moe_text_config
+
+
+ @dataclass(frozen=True)
+@@ -46,6 +47,9 @@ class V5Expansion:
+         arch = _arch_name(config)
+         self._enabled = "gpt_oss" not in arch and "gptoss" not in arch
+         self._is_mixtral = "mixtral" in arch
++        self._gemma4_text = (
++            moe_text_config(config) if "gemma4" in arch else None
++        )
+         if self._is_mixtral:
+             self._gate, self._up, self._down = "w1", "w3", "w2"
+         else:
+@@ -58,6 +62,24 @@ class V5Expansion:
+         self._virtual: dict[str, _VirtualMember] = {}
+         self._renamed: dict[str, str] = {}
+
++    def _validate_gemma4_shape(self, name, spec, part):
++        text = self._gemma4_text
++        if text is None:
++            return
++        expected = (
++            (text.num_experts, 2 * text.moe_intermediate_size, text.hidden_size)
++            if part == "gate_up"
++            else (
++                text.num_experts,
++                text.hidden_size,
++                text.moe_intermediate_size,
++            )
++        )
++        if tuple(spec.shape) != expected:
++            raise ValueError(
++                f"Gemma4 {name} shape {spec.shape} does not match {expected}"
++            )
++
+     def _out_block(self, experts_prefix: str) -> str:
+         block_prefix = experts_prefix[: -len(".experts")]
+         if self._is_mixtral and block_prefix.endswith(".mlp"):
+@@ -71,6 +93,7 @@ class V5Expansion:
+         for name in names:
+             if name.endswith("experts.gate_up_proj"):
+                 spec = self._spec_of(name)
++                self._validate_gemma4_shape(name, spec, "gate_up")
+                 if len(spec.shape) != 3:
+                     out.append(name)
+                     continue
+@@ -84,6 +107,7 @@ class V5Expansion:
+                     out.extend((gate, up))
+             elif name.endswith("experts.down_proj"):
+                 spec = self._spec_of(name)
++                self._validate_gemma4_shape(name, spec, "down")
+                 if len(spec.shape) != 3:
+                     out.append(name)
+                     continue
+diff --git a/moe_store/parsing/hf_config.py b/moe_store/parsing/hf_config.py
+index 6b127a5..c8f733e 100644
+--- a/moe_store/parsing/hf_config.py
++++ b/moe_store/parsing/hf_config.py
+@@ -129,6 +129,13 @@ def parse_moe_param(config: PretrainedConfig) -> Tuple[int, int, int]:
+         num_decoder_layers = text.num_hidden_layers
+         num_layers = text.num_hidden_layers
+         num_experts = text.num_experts
++    elif "gemma4" in arch:
++        text = moe_text_config(config)
++        if not getattr(text, "enable_moe_block", False):
++            raise RuntimeError("Gemma4 offloading requires enable_moe_block")
++        num_encoder_layers = 0
++        num_layers = text.num_hidden_layers
++        num_experts = text.num_experts
+     elif "qwen3omnimoe" in arch:
+         text = _thinker_text_config(config)
+         num_encoder_layers = 0
+@@ -289,6 +296,18 @@ def parse_expert_id(
+             layer_id, expert_id = result[0]
+             layer_id = int(layer_id)
+             expert_id = int(expert_id)
++    elif "gemma4" in arch:
++        decoder_sparse_step = 1
++        layer_type = "decoder"
++        result = re.findall(
++            r"^model\.language_model\.layers\.(\d+)\.experts\.(\d+)\.",
++            param_name,
++        )
++        if result:
++            layer_id, expert_id = (int(value) for value in result[0])
++            text = moe_text_config(config)
++            if layer_id >= num_layers or expert_id >= text.num_experts:
++                return None, None
+     elif "qwen3vlmoe" in arch:
+         decoder_sparse_step = 1
+         layer_type = "decoder"
+diff --git a/moe_store/registry/constants.py b/moe_store/registry/constants.py
+index 3f01ad2..a5c07f6 100644
+--- a/moe_store/registry/constants.py
++++ b/moe_store/registry/constants.py
+@@ -57,6 +57,11 @@ try:
+ except ImportError:
+     HYV3ForCausalLM = None
+
++try:
++    from transformers import Gemma4ForConditionalGeneration
++except ImportError:
++    Gemma4ForConditionalGeneration = None
++
+ MODEL_MAPPING_NAMES = {
+     "nllb": NllbMoeForConditionalGeneration,
+     "mixtral": MixtralForCausalLM,
+@@ -163,6 +168,10 @@ if HYV3ForCausalLM is not None:
+     MODEL_MAPPING_NAMES["hyv3"] = HYV3ForCausalLM
+     MODEL_MAPPING_TYPES["hyv3"] = 5
+
++if Gemma4ForConditionalGeneration is not None:
++    MODEL_MAPPING_NAMES["gemma4"] = Gemma4ForConditionalGeneration
++    MODEL_MAPPING_TYPES["gemma4"] = 5
++
+
+ # Dense diffusion transformers (diffusers-style `_class_name` configs) have
+ # no MoE experts: every tensor is stored in dense groups and the expert type
+diff --git a/moe_store/registry/slots.py b/moe_store/registry/slots.py
+index 2883109..c355147 100644
+--- a/moe_store/registry/slots.py
++++ b/moe_store/registry/slots.py
+@@ -53,7 +53,8 @@ def slot_table_for_arch(arch: str) -> tuple[str, ...] | None:
+     if "dbrx" in arch:
+         return _SLOT_TABLES["dbrx"]
+     if any(
+-        key in arch for key in ("deepseek", "qwen", "olmoe", "glm", "jamba")
++        key in arch
++        for key in ("deepseek", "qwen", "olmoe", "glm", "jamba", "gemma4")
+     ):
+         return _SLOT_TABLES["gate_up_down"]
+     return None
+diff --git a/moe_store/wrappers/__init__.py b/moe_store/wrappers/__init__.py
+index 97d2b9c..a9937a0 100644
+--- a/moe_store/wrappers/__init__.py
++++ b/moe_store/wrappers/__init__.py
+@@ -7,6 +7,7 @@ from .dbrx import SyncDbrxFFNBlock
+ from .deepseek import DeepseekMoEBlock
+ from .deepseek_v2_wrapper import SyncDeepseekV2MoEBlock
+ from .deepseek_v3_wrapper import SyncDeepseekV3MoEBlock
++from .gemma4 import SyncGemma4TextExperts
+ from .glm5_next import SyncGlm5NextMoEBlock
+ from .glm_moe_dsa import SyncGlmMoeDsaMoEBlock
+ from .gpt_oss import SyncGptOssMLP
+@@ -40,6 +41,7 @@ __all__ = [
+     "SyncDbrxFFNBlock",
+     "SyncDeepseekV2MoEBlock",
+     "SyncDeepseekV3MoEBlock",
++    "SyncGemma4TextExperts",
+     "SyncGlm5NextMoEBlock",
+     "SyncGlmMoeDsaMoEBlock",
+     "SyncGptOssMLP",
+diff --git a/moe_store/wrappers/gemma4.py b/moe_store/wrappers/gemma4.py
+new file mode 100644
+index 0000000..8e0e2ee
+--- /dev/null
++++ b/moe_store/wrappers/gemma4.py
+@@ -0,0 +1,91 @@
++# Copyright (c) EfficientMoE.
++# SPDX-License-Identifier: Apache-2.0
++
++from typing import Optional
++
++import torch
++import torch.nn as nn
++from transformers.activations import ACT2FN
++
++
++class _Gemma4ExpertMLP(nn.Module):
++    def __init__(self, config):
++        super().__init__()
++        hidden = config.hidden_size
++        intermediate = config.moe_intermediate_size
++        self.gate_proj = nn.Linear(hidden, intermediate, bias=False)
++        self.up_proj = nn.Linear(hidden, intermediate, bias=False)
++        self.down_proj = nn.Linear(intermediate, hidden, bias=False)
++        self.act_fn = ACT2FN[config.hidden_activation]
++
++    def forward(self, hidden_states):
++        return self.down_proj(
++            self.act_fn(self.gate_proj(hidden_states))
++            * self.up_proj(hidden_states)
++        )
++
++
++class SyncGemma4TextExperts(nn.ModuleList):
++    archer_config = None
++    layer_id: Optional[int] = None
++
++    def __init__(self, config):
++        super().__init__(
++            [_Gemma4ExpertMLP(config) for _ in range(config.num_experts)]
++        )
++        self.num_experts = config.num_experts
++        self.top_k = config.top_k_experts
++        self.expert_executor = None
++        self.expert_prefetcher = None
++        self.expert_tracer = None
++        self.expert_predictor = None
++        self.archer_engine = None
++        self.lib = None
++
++    @property
++    def experts(self):
++        return self
++
++    def forward(self, hidden_states, top_k_index, top_k_weights):
++        if self.expert_executor is None:
++            result = torch.zeros_like(hidden_states)
++            for expert_idx, expert in enumerate(self):
++                token_idx, top_k_pos = torch.where(top_k_index == expert_idx)
++                if token_idx.numel() == 0:
++                    continue
++                expert_out = expert(hidden_states[token_idx])
++                weighted = (
++                    expert_out * top_k_weights[token_idx, top_k_pos, None]
++                )
++                result.index_add_(0, token_idx, weighted.to(result.dtype))
++            return result
++
++        return self._dispatch(hidden_states, top_k_index, top_k_weights)
++
++    @torch.inference_mode(False)
++    @torch.no_grad()
++    def _dispatch(self, hidden_states, top_k_index, top_k_weights):
++        # Native workers update shared buffers outside the caller's thread state.
++        # HF reserves expert ID E as a sentinel; it contributes no route.
++        valid = top_k_index != self.num_experts
++        safe_index = top_k_index.masked_fill(~valid, 0)
++        shape = (hidden_states.shape[0], self.num_experts)
++        route_counts = torch.zeros(
++            shape, dtype=torch.long, device=hidden_states.device
++        )
++        route_counts.scatter_add_(1, safe_index, valid.long())
++        routing_weights = torch.zeros(
++            shape, dtype=top_k_weights.dtype, device=hidden_states.device
++        )
++        routing_weights.scatter_add_(
++            1, safe_index, top_k_weights.masked_fill(~valid, 0)
++        )
++        self.expert_executor.dispatch_local(
++            self.layer_id,
++            hidden_states,
++            route_counts > 0,
++            routing_weights,
++        )
++        return self.expert_executor.wait_dispatch_local().to(
++            hidden_states.dtype
++        )
+diff --git a/tests/test_gemma4_registry.py b/tests/test_gemma4_registry.py
+new file mode 100644
+index 0000000..b98c640
+--- /dev/null
++++ b/tests/test_gemma4_registry.py
+@@ -0,0 +1,134 @@
++from types import SimpleNamespace
++from unittest.mock import MagicMock
++
++import pytest
++import torch
++from transformers import PretrainedConfig
++
++from moe_store.convert.planner import TensorSpec
++from moe_store.convert.v5_remap import V5Expansion
++from moe_store.parsing.hf_config import parse_expert_id, parse_moe_param
++from moe_store.registry import constants
++from moe_store.registry.slots import member_slot_rank
++from moe_store.wrappers import SyncGemma4TextExperts
++
++
++@pytest.fixture
++def gemma4_config():
++    return PretrainedConfig.from_dict(
++        {
++            "architectures": ["Gemma4ForConditionalGeneration"],
++            "model_type": "gemma4",
++            "text_config": {
++                "enable_moe_block": True,
++                "num_hidden_layers": 2,
++                "num_experts": 4,
++                "hidden_size": 32,
++                "moe_intermediate_size": 16,
++            },
++        }
++    )
++
++
++def test_gemma4_registration_is_guarded(gemma4_config):
++    model_class = constants.Gemma4ForConditionalGeneration
++    assert ("gemma4" in constants.MODEL_MAPPING_NAMES) is (
++        model_class is not None
++    )
++    if model_class is not None:
++        assert constants.MODEL_MAPPING_NAMES["gemma4"] is model_class
++        assert constants.parse_expert_type(gemma4_config) == 5
++
++
++def test_gemma4_parses_nested_moe_config(gemma4_config):
++    assert parse_moe_param(gemma4_config) == (2, 4, 0)
++
++
++def test_gemma4_rejects_dense_configuration(gemma4_config):
++    gemma4_config.text_config["enable_moe_block"] = False
++    with pytest.raises(RuntimeError, match="enable_moe_block"):
++        parse_moe_param(gemma4_config)
++
++
++@pytest.mark.parametrize(
++    "name, expected",
++    [
++        ("model.language_model.layers.1.experts.3.gate_proj.weight", (1, 3)),
++        ("model.language_model.layers.0.experts.2.down_proj.weight", (0, 2)),
++        (
++            "model.language_model.layers.2.experts.0.up_proj.weight",
++            (None, None),
++        ),
++        (
++            "model.language_model.layers.0.experts.4.up_proj.weight",
++            (None, None),
++        ),
++        ("model.language_model.layers.0.router.proj.weight", (None, None)),
++        ("model.language_model.layers.0.router.per_expert_scale", (None, None)),
++        ("model.language_model.layers.0.mlp.gate_proj.weight", (None, None)),
++        (
++            "model.vision_tower.layers.0.experts.0.gate_proj.weight",
++            (None, None),
++        ),
++    ],
++)
++def test_gemma4_expert_ids(gemma4_config, name, expected):
++    assert parse_expert_id(name, gemma4_config) == expected
++
++
++def test_gemma4_member_slot_order():
++    prefix = "model.language_model.layers.0.experts.0"
++    assert [
++        member_slot_rank(
++            "Gemma4ForConditionalGeneration", f"{prefix}.{slot}.weight"
++        )
++        for slot in ("gate_proj", "up_proj", "down_proj")
++    ] == [0, 1, 2]
++
++
++def test_gemma4_dispatch_preserves_router_weights_and_bf16_output():
++    config = SimpleNamespace(
++        hidden_size=32,
++        moe_intermediate_size=16,
++        num_experts=4,
++        top_k_experts=2,
++        hidden_activation="gelu_pytorch_tanh",
++    )
++    module = SyncGemma4TextExperts(config).bfloat16()
++    module.layer_id = 1
++    module.expert_executor = MagicMock()
++    native_output = torch.randn(2, 32, dtype=torch.float32)
++    module.expert_executor.wait_dispatch_local.return_value = native_output
++    hidden = torch.randn(2, 32, dtype=torch.bfloat16)
++    indices = torch.tensor([[0, 1], [2, 4]])
++    weights = torch.tensor([[0.25, 1.75], [2.0, 0.5]], dtype=torch.float32)
++    with torch.inference_mode():
++        actual = module(hidden, indices, weights)
++    torch.testing.assert_close(actual, native_output.bfloat16(), rtol=0, atol=0)
++    assert actual.dtype == torch.bfloat16
++    layer, passed_hidden, mask, routed = (
++        module.expert_executor.dispatch_local.call_args.args
++    )
++    assert layer == 1 and passed_hidden is hidden
++    assert routed.dtype == torch.float32
++    torch.testing.assert_close(
++        routed, torch.tensor([[0.25, 1.75, 0, 0], [0, 0, 2, 0]])
++    )
++    assert torch.equal(mask, routed != 0)
++
++
++@pytest.mark.parametrize(
++    "field, shape",
++    [
++        ("gate_up_proj", (4, 32, 32, 1)),
++        ("gate_up_proj", (3, 32, 32)),
++        ("gate_up_proj", (4, 16, 32)),
++        ("down_proj", (4, 16, 32)),
++    ],
++)
++def test_gemma4_rejects_wrong_packed_layout(gemma4_config, field, shape):
++    name = f"model.language_model.layers.0.experts.{field}"
++    spec = TensorSpec(name, 0, "bfloat16", shape)
++    expansion = V5Expansion(gemma4_config, lambda _: spec)
++    with pytest.raises(ValueError, match="Gemma4.*shape"):
++        expansion.expand_names([name])
+diff --git a/tests/test_registry_conversion_matrix.py b/tests/test_registry_conversion_matrix.py
+index bbff011..8b5fa61 100644
+--- a/tests/test_registry_conversion_matrix.py
++++ b/tests/test_registry_conversion_matrix.py
+@@ -248,3 +248,79 @@ def test_opt_converts_dense_only(tmp_path):
+     convert_checkpoint(str(ckpt_dir), str(tmp_path / "store"))
+     index = read_index(tmp_path / "store")
+     assert not any(g.is_expert for g in index.groups)
++
++
++def test_gemma4_preserves_bf16_and_gated_expert_slot_order(tmp_path):
++    ckpt_dir = tmp_path / "ckpt"
++    ckpt_dir.mkdir()
++    config = {
++        "architectures": ["Gemma4ForConditionalGeneration"],
++        "model_type": "gemma4",
++        "dtype": "bfloat16",
++        "text_config": {
++            "model_type": "gemma4_text",
++            "enable_moe_block": True,
++            "hidden_size": HIDDEN,
++            "intermediate_size": 2 * FFN,
++            "moe_intermediate_size": FFN,
++            "num_hidden_layers": 2,
++            "num_experts": NUM_EXPERTS,
++            "top_k_experts": 2,
++            "num_attention_heads": 4,
++            "num_key_value_heads": 2,
++            "head_dim": 8,
++            "global_head_dim": 8,
++            "num_global_key_value_heads": 2,
++            "layer_types": ["sliding_attention", "full_attention"],
++            "vocab_size": 64,
++            "dtype": "bfloat16",
++        },
++    }
++    (ckpt_dir / "config.json").write_text(json.dumps(config))
++    torch.manual_seed(59)
++    state = {
++        "model.vision_tower.patch_embedder.weight": torch.randn(
++            HIDDEN, 4, dtype=torch.bfloat16
++        )
++    }
++    for layer in range(2):
++        prefix = f"model.language_model.layers.{layer}"
++        state[f"{prefix}.experts.gate_up_proj"] = torch.randn(
++            NUM_EXPERTS, 2 * FFN, HIDDEN, dtype=torch.bfloat16
++        )
++        state[f"{prefix}.experts.down_proj"] = torch.randn(
++            NUM_EXPERTS, HIDDEN, FFN, dtype=torch.bfloat16
++        )
++        state[f"{prefix}.router.per_expert_scale"] = torch.randn(
++            NUM_EXPERTS, dtype=torch.bfloat16
++        )
++        state[f"{prefix}.mlp.gate_proj.weight"] = torch.randn(
++            2 * FFN, HIDDEN, dtype=torch.bfloat16
++        )
++    save_file(state, str(ckpt_dir / "model.safetensors"))
++    store_dir = tmp_path / "store"
++    convert_checkpoint(str(ckpt_dir), str(store_dir))
++    index = read_index(store_dir)
++    assert len([group for group in index.groups if group.is_expert]) == 8
++    for layer in range(2):
++        for expert in range(NUM_EXPERTS):
++            prefix = f"model.language_model.layers.{layer}.experts"
++            gate, up = state[f"{prefix}.gate_up_proj"][expert].chunk(2)
++            expected = (gate, up, state[f"{prefix}.down_proj"][expert])
++            group = index.expert_group(layer, expert)
++            assert [member.name.split(".")[-2] for member in group.members] == [
++                "gate_proj",
++                "up_proj",
++                "down_proj",
++            ]
++            for member, tensor in zip(group.members, expected):
++                loaded = read_member_tensor(store_dir, group, member)
++                assert loaded.dtype == torch.bfloat16
++                assert torch.equal(loaded, tensor.contiguous())
++    dense = {
++        member.name
++        for group in index.groups
++        if not group.is_expert
++        for member in group.members
++    }
++    assert dense == {name for name in state if ".experts." not in name}
+
+base-commit: 1ded9ff58147f5b9d0234bedc1d924cdb7878b3d

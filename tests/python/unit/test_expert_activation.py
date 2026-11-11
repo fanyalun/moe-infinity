@@ -5,6 +5,7 @@ from transformers import PretrainedConfig
 
 from moe_infinity.runtime.expert_activation import (
     CLAMPED_SILU,
+    GELU_TANH,
     SILU,
     SWIGLU_OAI,
     ExpertActivation,
@@ -23,6 +24,33 @@ def test_plain_silu_families():
         cfg = _cfg(hidden_act="silu")
         cfg.model_type = model_type
         assert resolve_expert_activation(cfg, 5) == ExpertActivation()
+
+
+@pytest.mark.parametrize("expert_type", (4, 5))
+@pytest.mark.parametrize("nested", (False, True))
+def test_gemma4_uses_gelu_tanh(expert_type, nested):
+    text = {"hidden_activation": "gelu_pytorch_tanh"}
+    cfg = _cfg(text_config=text) if nested else _cfg(**text)
+    cfg.model_type = "gemma4" if nested else "gemma4_text"
+    act = resolve_expert_activation(cfg, expert_type)
+    assert act == ExpertActivation(GELU_TANH)
+    assert act.name == "gelu_pytorch_tanh"
+    assert act.as_args() == (GELU_TANH, 1.0, 0.0)
+
+
+def test_text_activation_wins_over_outer_wrapper_activation():
+    cfg = _cfg(
+        hidden_activation="gelu_pytorch_tanh",
+        text_config={"hidden_act": "silu"},
+    )
+    assert resolve_expert_activation(cfg, 5) == ExpertActivation()
+
+
+@pytest.mark.parametrize("hidden_act", ("gelu_new", "gelu_fast", "gelu"))
+def test_other_gelu_formulations_are_not_aliased(hidden_act):
+    cfg = _cfg(hidden_activation=hidden_act)
+    with pytest.warns(UserWarning, match="SiLU-gated"):
+        assert resolve_expert_activation(cfg, 5).kind == SILU
 
 
 def test_glm5_next_nested_text_config_is_clamped():
@@ -99,7 +127,8 @@ class _Dispatcher:
 def test_apply_expert_activation_forwards_descriptor():
     d = _Dispatcher()
     apply_expert_activation(d, ExpertActivation(SWIGLU_OAI, 1.702, 7.0))
-    assert d.calls == [(SWIGLU_OAI, 1.702, 7.0)]
+    apply_expert_activation(d, ExpertActivation(GELU_TANH))
+    assert d.calls == [(SWIGLU_OAI, 1.702, 7.0), (GELU_TANH, 1.0, 0.0)]
 
 
 def test_apply_expert_activation_requires_binding_for_non_silu():
@@ -127,3 +156,21 @@ def test_reference_matches_hf_formulations():
         reference_gated_act(gate, up, ExpertActivation(SWIGLU_OAI, 1.702, 7)),
         (up.clamp(-7, 7) + 1) * g * torch.sigmoid(1.702 * g),
     )
+
+
+@pytest.mark.parametrize("dtype", (torch.float32, torch.bfloat16))
+def test_gelu_tanh_reference_matches_hf(dtype):
+    from transformers.activations import ACT2FN
+
+    gate = torch.linspace(-4, 4, 513, dtype=dtype)
+    up = torch.linspace(3, -3, 513, dtype=dtype)
+    actual = reference_gated_act(gate, up, ExpertActivation(GELU_TANH))
+    expected = ACT2FN["gelu_pytorch_tanh"](gate) * up
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert not torch.equal(actual, F.silu(gate) * up)
+
+
+def test_gemma4_hf_text_config():
+    mod = pytest.importorskip("transformers.models.gemma4.configuration_gemma4")
+    cfg = mod.Gemma4TextConfig()
+    assert resolve_expert_activation(cfg, 5) == ExpertActivation(GELU_TANH)

@@ -251,6 +251,7 @@ class MoE:
             "glm5_next",
             "minimax_m3_vl",
             "qwen3_vl_moe",
+            "gemma4",
             "hy_v3",
         ):
             self.use_native_engine = False
@@ -267,7 +268,11 @@ class MoE:
             if text_config is not None:
                 text_config.enable_minimax_m3_indexer_kernel = indexer_kernel
         default_max_seq_length = getattr(
-            model_config, "max_position_embeddings", None
+            getattr(model_config, "text_config", model_config)
+            if getattr(model_config, "model_type", "") == "gemma4"
+            else model_config,
+            "max_position_embeddings",
+            None,
         )
         self.max_seq_length = (
             int(default_max_seq_length)
@@ -316,6 +321,7 @@ class MoE:
                 or arch == "gptoss"
                 or arch == "qwen3"
                 or arch == "qwen3_5"
+                or arch == "gemma4"
                 or arch == "minimaxm3"
                 # hy_v3 declares FA2 support upstream, but force eager for
                 # first bring-up, matching the GLM-5.2 validated path. This
@@ -1240,7 +1246,7 @@ class MoE:
             and native_engine is not None
             and input_ids.ndim == 2
             and input_ids.shape[0] == 1
-            and model_type != "qwen3_vl_moe"
+            and model_type not in ("qwen3_vl_moe", "gemma4")
             and (not is_qwen35 or qwen35_dflash)
         )
 

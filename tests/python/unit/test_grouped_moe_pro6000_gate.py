@@ -105,6 +105,19 @@ def test_native_dispatcher_and_kernel_check_the_pro6000_gate():
             2,
         ),
         (SimpleNamespace(model_type="x", hidden_act="gelu"), -1),
+        (
+            SimpleNamespace(
+                model_type="gemma4_text", hidden_activation="gelu_pytorch_tanh"
+            ),
+            3,
+        ),
+        (
+            SimpleNamespace(
+                model_type="gemma4",
+                text_config={"hidden_activation": "gelu_pytorch_tanh"},
+            ),
+            3,
+        ),
     ],
 )
 def test_activation_kind_matches_expert_activation_rules(config, kind):
